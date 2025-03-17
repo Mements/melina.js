@@ -69,26 +69,28 @@ export async function measure<T>(
     console.log('===========================');
     console.log(`\n${logPrefix} ${action} ✗ ${duration.toFixed(2)}ms`, error);
     console.log('===========================');
-    throw new Error(`${action} failed: ${error}`);
+    // throw new Error(`${action} failed: ${error}`);
   }
 }
 
 interface PageConfig {
   route: string;
   target: string;
-  handler: (ctx: { requestId: string; measure: MeasureFn }) => Promise<any>;
+  handler?: (ctx: { requestId: string; measure: MeasureFn }) => Promise<any>;
 }
 
 interface ImportConfig {
   name: string;
   version?: string;
   deps?: string[];
+  external?: boolean | string[];
+  markAllExternal?: boolean;
 }
 
 export interface ServeOptions {
   pages: PageConfig[];
   api?: Record<string, (req: Request) => Promise<Response>>;
-  imports: ImportConfig[];
+  imports: Record<string, ImportConfig>;
 }
 
 type RouteMapping = Record<string, string>;
@@ -153,6 +155,26 @@ async function servePage(
   );
 }
 
+function resolvePagePath(targetName: string): string {
+  if (targetName.startsWith("./")) {
+    return targetName;
+  }
+
+  const possiblePaths = [
+    `./pages/${targetName}/${targetName}.html`,
+    `./pages/${targetName}/index.html`,
+    `./pages/${targetName}/App.html`
+  ];
+
+  for (const possiblePath of possiblePaths) {
+    if (existsSync(possiblePath)) {
+      return possiblePath;
+    }
+  }
+
+  return possiblePaths[0];
+}
+
 export async function serve(config: ServeOptions) {
   const isDev = process.env.NODE_ENV !== "production";
   const outdir = "./dist";
@@ -164,12 +186,7 @@ export async function serve(config: ServeOptions) {
 
   await measure(async (measure) => {
     for (const page of config.pages) {
-      let targetPath: string;
-      if (page.target.startsWith("./")) {
-        targetPath = page.target;
-      } else {
-        targetPath = `./pages/${page.target}/${page.target}.html`;
-      }
+      const targetPath = await resolvePagePath(page.target);
       const relativePath = targetPath.startsWith("./") ? targetPath.substring(2) : targetPath;
       routeMap[page.route] = relativePath;
       entrypoints[page.route] = { path: targetPath, serverData: page.handler };
@@ -177,7 +194,7 @@ export async function serve(config: ServeOptions) {
         const url = new URL(req.url);
         const query = Object.fromEntries(url.searchParams);
         const requestId = req.headers.get("X-Request-ID") || randomUUID().split('-')[0];
-        const ctx: { requestId: string; measure: MeasureFn } = {
+        const ctx = {
           request: req,
           method: req.method,
           path: url.pathname,
@@ -187,46 +204,69 @@ export async function serve(config: ServeOptions) {
           requestId,
           measure,
         };
-        return await page.handler(ctx);
+
+        return page.handler ? await page.handler(ctx) : {};
       };
     }
   }, "Initialize routes");
 
   const importMap: ImportMap = { imports: {} };
   const versionMap: Record<string, string> = {};
-  for (const imp of config.imports) {
+
+  Object.entries(config.imports).forEach(([key, imp]) => {
     if (imp.name.startsWith("@")) {
       versionMap[imp.name] = imp.version ?? "latest";
     } else {
       const baseName = imp.name.split("/")[0];
       versionMap[baseName] = imp.version ?? "latest";
     }
-  }
+  });
 
-  for (const imp of config.imports) {
+  Object.entries(config.imports).forEach(([key, imp]) => {
     let url: string;
+
+    const useStarPrefix = imp.markAllExternal === true;
+
     if (imp.name.startsWith("@")) {
-      url = `https://esm.sh/${imp.name}@${versionMap[imp.name]}`;
+      url = `https://esm.sh/${useStarPrefix ? '*' : ''}${imp.name}@${versionMap[imp.name]}`;
     } else {
       const parts = imp.name.split("/");
       const baseName = parts[0];
       const subPaths = parts.slice(1);
-      url = `https://esm.sh/${baseName}@${versionMap[baseName]}`;
+
+      url = `https://esm.sh/${useStarPrefix ? '*' : ''}${baseName}@${versionMap[baseName]}`;
       if (subPaths.length > 0) url += `/${subPaths.join("/")}`;
     }
 
     let queryParts: string[] = [];
+
+    if (imp.external && !useStarPrefix) {
+      if (Array.isArray(imp.external)) {
+        queryParts.push(`external=${imp.external.join(',')}`);
+      } else if (imp.external === true) {
+        const allDeps = Object.entries(config.imports)
+          .filter(([depKey]) => depKey !== key)
+          .map(([_, depImp]) => depImp.name.split('/')[0]);
+
+        const uniqueDeps = [...new Set(allDeps)];
+        if (uniqueDeps.length > 0) {
+          queryParts.push(`external=${uniqueDeps.join(',')}`);
+        }
+      }
+    }
+
     if (imp?.deps?.length) {
       const depsList = imp.deps
         .map((dep) => `${dep}@${versionMap[dep.split("/")[0]]}`)
         .join(",");
       queryParts.push(`deps=${depsList}`);
     }
+
     if (isDev) queryParts.push("dev");
     if (queryParts.length) url += `?${queryParts.join("&")}`;
 
-    importMap.imports[imp.name] = url;
-  }
+    importMap.imports[key] = url;
+  });
 
   let serverPort = -1;
   const buildConfig: BuildConfig = {
@@ -439,56 +479,89 @@ if (require.main === module) {
   serve(exampleConfig);
 }
 
-export function generateImports(packageJson: any, options: { exclude?: string[] } = {}) {
+/**
+ * Generates import configurations by reading package.json and optional bun.lock data
+ * 
+ * @param packageJson - The parsed package.json file
+ * @param bunLock - The parsed bun.lock file (optional)
+ * @returns Record of import configurations
+ */
+export function generateImports(
+  packageJson: any,
+  bunLock: any = { packages: {} }
+) {
   const dependencies = {
     ...packageJson.dependencies || {},
     ...packageJson.devDependencies || {}
   };
 
-  // Default exclusions plus any user-provided ones
-  const defaultExclusions = ["@types/", "typescript", "melinajs", "bun"];
-  const exclusions = [...defaultExclusions, ...(options.exclude || [])];
-  
-  // Map of known packages that require specific dependencies
-  const knownDependencyMap: Record<string, string[]> = {};
+  // Helper function to get clean version (no ^ or ~)
+  const getCleanVersion = (version: string) => version.replace(/^\^|~/, '');
 
-  const imports = Object.entries(dependencies)
-    .filter(([name]) => {
-      return !exclusions.some(pattern => name.startsWith(pattern) || name === pattern);
-    })
-    .map(([name, version]) => {
-      if (name === "react-dom" && packageJson.dependencies?.react) {
-        const reactVersion = packageJson.dependencies.react.replace(/^\^/, '');
-        return [
-          { name, version: (version as string).replace(/^\^/, '') },
-          { name: "react-dom/client", version: (version as string).replace(/^\^/, ''), deps: [] },
-          { name: "react/jsx-dev-runtime", version: reactVersion, deps: [] },
-          { name: "react/jsx-runtime", version: reactVersion, deps: [] }
-        ];
+  // Helper function to get version from package.json
+  const getVersionFromPackageJson = (packageName: string) => {
+    const version = dependencies[packageName];
+    return version ? getCleanVersion(version) : null;
+  };
+
+  // Create the imports object
+  const imports: Record<string, any> = {};
+
+  // Process dependencies
+  Object.entries(dependencies).forEach(([name, version]) => {
+    const cleanVersion = getCleanVersion(version as string);
+
+    // Check if this package exists in the lockfile
+    const lockPackage = bunLock.packages && bunLock.packages[name];
+    const peerDeps: string[] = [];
+
+    if (lockPackage) {
+      // Lock file format is [nameWithVersion, _, metadata, hash]
+      const metadata = lockPackage[2];
+
+      if (metadata && metadata.peerDependencies) {
+        // Process peer dependencies
+        Object.keys(metadata.peerDependencies).forEach(peerName => {
+          // Skip optional peers
+          if (metadata.optionalPeers && metadata.optionalPeers.includes(peerName)) {
+            return;
+          }
+
+          // Use version from package.json if available
+          const peerVersion = getVersionFromPackageJson(peerName);
+          if (peerVersion) {
+            peerDeps.push(peerName);
+          }
+        });
       }
+    }
 
-      if (name === "react") {
-        return {
-          name,
-          version: (version as string).replace(/^\^/, ''),
-          deps: []
-        };
-      }
+    // Add the import configuration
+    imports[name] = {
+      name,
+      version: cleanVersion,
+      ...(peerDeps.length > 0 ? { deps: peerDeps } : {})
+    };
+  });
 
-      if (knownDependencyMap[name]) {
-        return { 
-          name, 
-          version: (version as string).replace(/^\^/, ''), 
-          deps: knownDependencyMap[name] 
-        };
-      }
+  if (imports['react-dom']) {
+    imports['react-dom/client'] = {
+      ...imports['react-dom'],
+      name: 'react-dom/client'
+    };
+  }
 
-      return { 
-        name,
-        version: (version as string).replace(/^\^/, '')
-      };
-    })
-    .flat();
+  if (imports['react']) {
+    imports['react/jsx-runtime'] = {
+      ...imports['react'],
+      name: 'react/jsx-runtime'
+    };
+
+    imports['react/jsx-dev-runtime'] = {
+      ...imports['react'],
+      name: 'react/jsx-dev-runtime'
+    };
+  }
 
   return imports;
 }

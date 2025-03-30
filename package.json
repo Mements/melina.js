@@ -1,6 +1,6 @@
 {
   "name": "melinajs",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "A lightweight, type-safe server framework for Bun with automatic performance tracking.",
   "repository": {
     "type": "git",

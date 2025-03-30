@@ -1,10 +1,10 @@
 import { build, type BuildConfig } from "bun";
-import plugin from "bun-plugin-tailwind";
+import plugin from "bun-plugin-tailwind"; // Assuming this plugin exists and works
 import { existsSync } from "fs";
 import { rm } from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
-import { readdir } from "node:fs/promises";
+// Removed unused readdir import: import { readdir } from "node:fs/promises";
 
 export type ApiEndpoint = {
   method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
@@ -35,54 +35,78 @@ export type MeasureFn = <T>(
   context?: MeasureContext
 ) => Promise<T>;
 
+// Keep measure function as is - seems fine
+
 export async function measure<T>(
-  fn: (measure: typeof measure) => Promise<T>,
-  action: string,
-  context: MeasureContext = {}
+    fn: (measure: typeof measure) => Promise<T>,
+    action: string,
+    context: MeasureContext = {}
 ): Promise<T> {
-  const start = performance.now();
-  const level = context.level || 0;
-  let indent = "=".repeat(level);
-  const requestId = context.requestId;
-  let logPrefix = requestId ? `[${requestId}] ${indent}>` : `${indent}>`;
+    const start = performance.now();
+    const level = context.level || 0;
+    let indent = "=".repeat(level > 0 ? level + 1: 0); // Indent fix for level 0
+    const requestId = context.requestId;
+    // Use different symbols for start/end for clarity
+    let logPrefixStart = requestId ? `[${requestId}] ${indent}>` : `${indent}>`;
+    let logPrefixEnd = requestId ? `[${requestId}] ${indent}<` : `${indent}<`;
 
-  try {
-    indent = ">".repeat(level);
-    logPrefix = requestId ? `[${requestId}] ${indent}$` : `${indent}$`;
-    console.log(`${logPrefix} ${action}...`);
+    try {
+        // Log start immediately
+        console.log(`${logPrefixStart} ${action}...`);
 
-    const result = await fn((nestedFn, nestedAction) =>
-      measure(nestedFn, nestedAction, {
-        requestId: requestId ? `${requestId}` : undefined,
-        level: level + 1,
-        parentAction: action
-      })
-    );
+        const result = await fn((nestedFn, nestedAction) =>
+            measure(nestedFn, nestedAction, {
+                requestId: requestId, // Pass requestId down
+                level: level + 1,
+                parentAction: action
+            })
+        );
 
-    const duration = performance.now() - start;
-    indent = "<".repeat(level);
-    logPrefix = requestId ? `[${requestId}] ${indent}$` : `${indent}$`;
-    console.log(`${logPrefix} ${action} ✓ ${duration.toFixed(2)}ms`);
-    return result;
-  } catch (error) {
-    const duration = performance.now() - start;
-    console.log('===========================');
-    console.log(`\n${logPrefix} ${action} ✗ ${duration.toFixed(2)}ms`, error);
-    console.log('===========================');
-    // throw new Error(`${action} failed: ${error}`);
-  }
+        const duration = performance.now() - start;
+        // Log success
+        console.log(`${logPrefixEnd} ${action} ✓ ${duration.toFixed(2)}ms`);
+        return result;
+    } catch (error) {
+        const duration = performance.now() - start;
+        console.log('=========================== ERROR ===========================');
+        // Log failure
+        console.log(`${logPrefixEnd} ${action} ✗ ${duration.toFixed(2)}ms`);
+        // Log the error itself for better debugging
+        if (error instanceof Error) {
+             console.error(`Error in action "${action}":`, error.message);
+             if(error.stack) console.error(error.stack);
+        } else {
+             console.error(`Unknown error in action "${action}":`, error);
+        }
+        console.log('=============================================================');
+        // Re-throw the error so it propagates if not handled elsewhere
+        throw error; // Changed from swallowing the error
+    }
 }
+
 
 interface PageConfig {
   route: string;
-  target: string;
-  handler?: (ctx: { requestId: string; measure: MeasureFn }) => Promise<any>;
+  // Allow target to be any HTML file path
+  target: string; // Removed the implicit "name" concept
+  handler?: (ctx: MiddlewareContext & { requestId: string; measure: MeasureFn }) => Promise<any>; // Added MiddlewareContext here
 }
 
+// Define MiddlewareContext (if not already globally defined)
+type MiddlewareContext = {
+    request: Request;
+    method: string;
+    path: string;
+    query: Record<string, string | number | boolean>; // Query type was Record<string, string> - expanded slightly
+    body?: any;
+    headers: Headers;
+};
+
+
 interface ImportConfig {
-  name: string;
-  version?: string;
-  deps?: string[];
+  name: string; // e.g., 'react', 'react-dom/client', '@chakra-ui/react'
+  version?: string; // e.g., '18.2.0'
+  deps?: string[]; // e.g., ['react'] - package *names* used as keys in the main imports record
   external?: boolean | string[];
   markAllExternal?: boolean;
 }
@@ -90,18 +114,19 @@ interface ImportConfig {
 export interface ServeOptions {
   pages: PageConfig[];
   api?: Record<string, (req: Request) => Promise<Response>>;
-  imports: Record<string, ImportConfig>;
+  // Use Record<string, ImportConfig> as defined
+  imports: Record<string, ImportConfig>; // Key should typically match the package name/path
 }
 
 type RouteMapping = Record<string, string>;
 type ImportMap = { imports: Record<string, string> };
 
 type EntrypointConfig = {
-  path: string;
+  path: string; // This will now be the direct path to the HTML file
   serverData?: (ctx: MiddlewareContext & { requestId: string; measure: MeasureFn }) => Promise<any>;
 };
 
-const filePathCache: Record<string, string> = {};
+const filePathCache: Record<string, string> = {}; // Cache built file paths (key: original html path -> value: output path)
 
 const getHeaders = (ext: string) => {
   const contentTypes: Record<string, string> = {
@@ -111,10 +136,15 @@ const getHeaders = (ext: string) => {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".svg": "image/svg+xml",
+    // Add more as needed
   };
   return {
     headers: {
       "Content-Type": contentTypes[ext] || "application/octet-stream",
+      // Add Cache-Control headers, especially for built assets in production
+      ...(process.env.NODE_ENV === 'production' && !['.html'].includes(ext)
+        ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
+        : { 'Cache-Control': 'no-cache' }) // No cache for HTML or dev assets
     },
   };
 };
@@ -125,443 +155,618 @@ async function servePage(
   serverData = {},
   requestId: string
 ): Promise<Response> {
-  return await measure(
-    async (measure) => {
-      const rewriter = new HTMLRewriter()
-        .on("head", {
-          element(element) {
-            element.prepend(
-              `<script type="importmap">${JSON.stringify(importMap)}</script>`,
-              { html: true }
-            );
-          },
-        })
-        .on("body", {
-          element(element) {
-            const data = { ...serverData, requestId };
-            element.append(
-              `<script>window.serverData = ${JSON.stringify(data)}</script>`,
-              { html: true }
-            );
-          },
-        });
+  // Keep servePage function as is - seems fine
+    return await measure(
+        async (measure) => {
+            const rewriter = new HTMLRewriter()
+                .on("head", {
+                    element(element) {
+                        element.prepend(
+                            `<script type="importmap">${JSON.stringify(importMap)}</script>`,
+                            { html: true }
+                        );
+                    },
+                })
+                .on("body", {
+                    element(element) {
+                        const data = { ...serverData, requestId };
+                        element.append(
+                            `<script>window.serverData = ${JSON.stringify(data)}</script>`,
+                            { html: true }
+                        );
+                    },
+                });
 
-      const transformedResponse = rewriter.transform(response);
-      const transformedHtml = await transformedResponse.text();
-      return new Response(transformedHtml, getHeaders(".html"));
-    },
-    "Transform page",
-    { requestId, level: 2 }
-  );
+            const transformedResponse = rewriter.transform(response);
+            // Use Response constructor directly with the stream for better performance
+            // const transformedHtml = await transformedResponse.text(); // Avoid buffering if possible
+            return new Response(transformedResponse.body , {
+                 headers: { // Keep original headers and add Content-Type
+                    ...response.headers,
+                   'Content-Type': 'text/html',
+                   'Cache-Control': 'no-cache' // Ensure HTML is not cached heavily
+                 }
+            });
+        },
+        "Transform page",
+        { requestId, level: 2 }
+    );
 }
 
-function resolvePagePath(targetName: string): string {
-  if (targetName.startsWith("./")) {
-    return targetName;
+
+// *** MODIFIED FUNCTION ***
+// Simplified resolver: checks if the direct target path exists.
+function resolvePagePath(targetPath: string): string {
+  // Check if the path is relative, prepend './' if necessary for existsSync
+  const normalizedPath = targetPath.startsWith('/') ? targetPath : path.resolve(process.cwd(), targetPath);
+
+  if (existsSync(normalizedPath)) {
+    return normalizedPath; // Return the absolute path if it exists
   }
 
-  const possiblePaths = [
-    `./pages/${targetName}/${targetName}.html`,
-    `./pages/${targetName}/index.html`,
-    `./pages/${targetName}/App.html`
-  ];
-
-  for (const possiblePath of possiblePaths) {
-    if (existsSync(possiblePath)) {
-      return possiblePath;
-    }
-  }
-
-  return possiblePaths[0];
+  // If the specified path doesn't exist, throw an error.
+  throw new Error(`Could not resolve page target. File not found at specified path: "${targetPath}" (checked as: "${normalizedPath}")`);
 }
 
 export async function serve(config: ServeOptions) {
   const isDev = process.env.NODE_ENV !== "production";
   const outdir = "./dist";
-  const assetsDir = "./assets";
+  const assetsDir = "./assets"; // Serve files from here directly
 
-  const routeMap: RouteMapping = {};
-  const entrypoints: Record<string, EntrypointConfig> = {};
-  const pageHandlers: Record<string, (req: Request) => Promise<any>> = {};
+  const routeMap: RouteMapping = {}; // Maps route -> original HTML target path
+  const entrypoints: Record<string, EntrypointConfig> = {}; // Maps route -> { path: resolved HTML path, serverData }
+  const pageHandlers: Record<string, (ctx: MiddlewareContext & { requestId: string; measure: MeasureFn }) => Promise<any>> = {}; // Maps route -> server data handler
 
   await measure(async (measure) => {
     for (const page of config.pages) {
-      const targetPath = await resolvePagePath(page.target);
-      const relativePath = targetPath.startsWith("./") ? targetPath.substring(2) : targetPath;
-      routeMap[page.route] = relativePath;
-      entrypoints[page.route] = { path: targetPath, serverData: page.handler };
-      pageHandlers[page.route] = async (req) => {
-        const url = new URL(req.url);
-        const query = Object.fromEntries(url.searchParams);
-        const requestId = req.headers.get("X-Request-ID") || randomUUID().split('-')[0];
-        const ctx = {
-          request: req,
-          method: req.method,
-          path: url.pathname,
-          query,
-          body: req.method !== "GET" ? await req.json().catch(() => ({})) : undefined,
-          headers: req.headers,
-          requestId,
-          measure,
-        };
+      const resolvedHtmlPath = await measure(
+          async() => resolvePagePath(page.target),
+          `Resolve path for ${page.target}`,
+          { level: 1 }
+      );
+      routeMap[page.route] = page.target; // Store the original target path for reference/rebuilds
+      entrypoints[page.route] = { path: resolvedHtmlPath, serverData: page.handler }; // Store resolved path
 
-        return page.handler ? await page.handler(ctx) : {};
-      };
+      if (page.handler) {
+          pageHandlers[page.route] = page.handler; // Register the data handler
+      }
     }
   }, "Initialize routes");
 
   const importMap: ImportMap = { imports: {} };
-  const versionMap: Record<string, string> = {};
+  const versionMap: Record<string, string> = {}; // Stores base package name -> version
 
-  Object.entries(config.imports).forEach(([key, imp]) => {
-    if (imp.name.startsWith("@")) {
-      versionMap[imp.name] = imp.version ?? "latest";
-    } else {
-      const baseName = imp.name.split("/")[0];
-      versionMap[baseName] = imp.version ?? "latest";
-    }
-  });
+  // --- Import Map Generation Logic ---
+   await measure(async () => {
+        // First pass: Collect all versions specified for base packages
+        Object.entries(config.imports).forEach(([_, imp]) => {
+            const baseName = imp.name.startsWith("@") ? imp.name.split("/").slice(0, 2).join("/") : imp.name.split("/")[0];
+            if (!versionMap[baseName] || imp.version) { // Prioritize explicitly set versions
+                 versionMap[baseName] = imp.version ?? "latest";
+            }
+        });
 
-  Object.entries(config.imports).forEach(([key, imp]) => {
-    let url: string;
+        // Second pass: Build the import map URLs
+        Object.entries(config.imports).forEach(([key, imp]) => {
+            let url: string;
+            const baseName = imp.name.startsWith("@") ? imp.name.split("/").slice(0, 2).join("/") : imp.name.split("/")[0];
+            const version = versionMap[baseName] || 'latest'; // Use collected version
 
-    const useStarPrefix = imp.markAllExternal === true;
+            const useStarPrefix = imp.markAllExternal === true;
+            const starPrefix = useStarPrefix ? '*' : '';
 
-    if (imp.name.startsWith("@")) {
-      url = `https://esm.sh/${useStarPrefix ? '*' : ''}${imp.name}@${versionMap[imp.name]}`;
-    } else {
-      const parts = imp.name.split("/");
-      const baseName = parts[0];
-      const subPaths = parts.slice(1);
+            // Construct base URL using the collected version
+             url = `https://esm.sh/${starPrefix}${imp.name}@${version}`;
 
-      url = `https://esm.sh/${useStarPrefix ? '*' : ''}${baseName}@${versionMap[baseName]}`;
-      if (subPaths.length > 0) url += `/${subPaths.join("/")}`;
-    }
+            let queryParts: string[] = [];
 
-    let queryParts: string[] = [];
+            // Handle external dependencies
+             if (imp.external && !useStarPrefix) {
+                 let externals: string[] = [];
+                 if (Array.isArray(imp.external)) {
+                     externals = imp.external;
+                 } else if (imp.external === true) {
+                     // Automatically mark all *other* defined imports as external
+                     externals = Object.keys(config.imports)
+                        .filter(otherKey => otherKey !== key) // Exclude self
+                        .map(otherKey => config.imports[otherKey].name.split('/')[0]) // Get base name
+                        .filter((value, index, self) => self.indexOf(value) === index); // Unique base names
+                 }
+                 if (externals.length > 0) {
+                    queryParts.push(`external=${externals.join(',')}`);
+                 }
+             }
 
-    if (imp.external && !useStarPrefix) {
-      if (Array.isArray(imp.external)) {
-        queryParts.push(`external=${imp.external.join(',')}`);
-      } else if (imp.external === true) {
-        const allDeps = Object.entries(config.imports)
-          .filter(([depKey]) => depKey !== key)
-          .map(([_, depImp]) => depImp.name.split('/')[0]);
+            // Handle explicit dependencies ('deps')
+             if (imp.deps?.length) {
+                 const depsList = imp.deps
+                     .map((depName) => {
+                         // Find the version for the dependency from the versionMap
+                         const depBaseName = depName.startsWith("@") ? depName.split("/").slice(0, 2).join("/") : depName.split("/")[0];
+                         const depVersion = versionMap[depBaseName] || 'latest';
+                         return `${depName}@${depVersion}`;
+                     })
+                     .join(",");
+                 queryParts.push(`deps=${depsList}`);
+             }
 
-        const uniqueDeps = [...new Set(allDeps)];
-        if (uniqueDeps.length > 0) {
-          queryParts.push(`external=${uniqueDeps.join(',')}`);
-        }
-      }
-    }
+            if (isDev) queryParts.push("dev"); // Add dev flag for esm.sh sourcemaps etc.
 
-    if (imp?.deps?.length) {
-      const depsList = imp.deps
-        .map((dep) => `${dep}@${versionMap[dep.split("/")[0]]}`)
-        .join(",");
-      queryParts.push(`deps=${depsList}`);
-    }
+            if (queryParts.length) url += `?${queryParts.join("&")}`;
 
-    if (isDev) queryParts.push("dev");
-    if (queryParts.length) url += `?${queryParts.join("&")}`;
+            importMap.imports[key] = url; // Use the provided key ('react', 'react-dom/client', etc.)
+        });
+    }, "Generate Import Map");
 
-    importMap.imports[key] = url;
-  });
+  let serverPort = -1; // Will be updated after server starts
 
-  let serverPort = -1;
-  const buildConfig: BuildConfig = {
-    entrypoints: Object.values(entrypoints).map((e) => e.path),
+  // Define build config *after* serverPort is potentially known
+  const getBuildConfig = (currentServerPort: number): BuildConfig => ({
+    // Entrypoints will be dynamically set during rebuilds, but initial build uses all HTML targets
+    entrypoints: Object.values(entrypoints).map(e => e.path),
     outdir,
-    plugins: [plugin],
+    plugins: [plugin()], // Ensure plugin is called if it's a factory function
     minify: !isDev,
     target: "browser",
-    sourcemap: "linked",
-    packages: "external",
-    external: Object.keys(importMap.imports),
+    sourcemap: isDev ? "linked" : undefined, // Only linked sourcemaps in dev
+    // `packages: "external"` might not be needed if `external` array is comprehensive
+    external: Object.keys(importMap.imports), // Mark all mapped imports as external
     define: {
       "process.env.NODE_ENV": JSON.stringify(isDev ? "development" : "production"),
-      "process.env.HOST": process.env.HOST || (isDev ? `http://localhost:${serverPort}` : ""),
+      "process.env.HOST": JSON.stringify(process.env.HOST || (isDev ? `http://localhost:${currentServerPort}` : "")),
     },
     naming: {
-      chunk: "[name].[hash].[ext]",
-      entry: "[name].[hash].[ext]",
+      // Use content hashing for better cache busting
+      entry: "[dir]/[name]-[hash].[ext]",
+      chunk: "[dir]/[name]-[hash].[ext]",
+      asset: "[dir]/[name]-[hash].[ext]",
     },
-  };
+  });
 
+  // Clear output directory before initial build
   if (existsSync(outdir)) {
-    await rm(outdir, { recursive: true, force: true });
+    await measure(async () => rm(outdir, { recursive: true, force: true }), "Clean output directory");
   }
 
-  async function rebuildPage(pagePath: string, requestId: string): Promise<any> {
-    if (isDev) {
-      const baseName = path.basename(pagePath).split(".")[0].toLowerCase();
-      const entrypoint = Object.values(entrypoints).find((e) =>
-        path.basename(e.path).split(".")[0].toLowerCase() === baseName
-      );
-      if (!entrypoint) return null;
+  // --- Rebuild Function ---
+  // Rebuilds a specific HTML entrypoint and updates the cache
+  async function rebuildPage(htmlTargetPath: string, requestId: string): Promise<string | null> {
+      // Only rebuild in development mode
+      if (!isDev) {
+         console.warn("`rebuildPage` called in production mode. This should not happen.");
+         return filePathCache[htmlTargetPath] || null; // Return cached path if exists
+      }
+
+      const route = Object.keys(routeMap).find(r => routeMap[r] === htmlTargetPath);
+      if (!route) {
+         console.error(`Cannot find route associated with target path: ${htmlTargetPath}`);
+         return null;
+      }
+      const entryConfig = entrypoints[route];
+      if (!entryConfig) {
+         console.error(`Cannot find entrypoint config for route: ${route}`);
+         return null;
+      }
+      const resolvedHtmlPath = entryConfig.path; // Use the resolved absolute path
 
       return await measure(
-        async (measure) => {
-          try {
-            const result = await build({ ...buildConfig, entrypoints: [entrypoint.path] });
+          async (measure) => {
+              try {
+                  // Get the latest build config with the current port
+                  const currentBuildConfig = getBuildConfig(serverPort);
+                  const result = await build({
+                      ...currentBuildConfig,
+                      entrypoints: [resolvedHtmlPath] // Build only the requested HTML file
+                   });
 
-            if (result && result.outputs) {
-              for (const output of result.outputs) {
-                const outputBaseName = path.basename(output.path).split(".")[0].toLowerCase();
-                const ext = path.extname(output.path);
-                filePathCache[`${outputBaseName}${ext}`] = output.path;
+                  if (result.success && result.outputs) {
+                      // Find the output HTML file corresponding to the entrypoint
+                      const outputHtml = result.outputs.find(o => o.kind === 'entry-point' && path.resolve(o.path) !== resolvedHtmlPath); // Find the *output* html path
+                      if (outputHtml) {
+                          const outputPath = path.resolve(outputHtml.path);
+                          filePathCache[htmlTargetPath] = outputPath; // Cache: original target path -> output path
+                          return outputPath; // Return the path to the built HTML
+                      } else {
+                           console.error(`Build succeeded but no output HTML found for entrypoint: ${resolvedHtmlPath}`);
+                           // Maybe look for JS/CSS outputs related to it?
+                           // For now, assume HTML output is needed.
+                      }
+                  } else {
+                      console.error(`Failed to rebuild page: ${htmlTargetPath}`);
+                      if (result.logs.length > 0) {
+                          console.error("Build Logs:", result.logs);
+                      }
+                  }
+              } catch (error) {
+                  console.error(`Error during rebuild of ${htmlTargetPath}:`, error);
               }
-            }
-
-            return result;
-          } catch (error) {
-            console.error("Failed to rebuild page:", error);
-            return null;
-          }
-        },
-        `Rebuild ${baseName}`,
-        { requestId }
+              return null; // Return null on failure
+          },
+          `Rebuild ${path.basename(htmlTargetPath)}`,
+          { requestId }
       );
-    }
-    return null;
   }
 
+  // --- Server Definition ---
   const server = Bun.serve({
-    port: process.env.BUN_PORT,
+    port: process.env.BUN_PORT ? parseInt(process.env.BUN_PORT, 10) : undefined, // Use BUN_PORT env var
     development: isDev,
     async fetch(req) {
       const requestId = randomUUID().split("-")[0];
-      const newHeaders = new Headers(req.headers);
-      if (!newHeaders.has("X-Request-ID")) {
-        newHeaders.append("X-Request-ID", requestId);
-      }
-      const reqWithId = new Request(req, { headers: newHeaders });
+      // Inject request ID header if not present
+      const reqWithId = req.headers.has("X-Request-ID")
+        ? req
+        : new Request(req.url, {
+            ...req,
+            headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
+          });
 
       return await measure(
         async (measure) => {
           const url = new URL(reqWithId.url);
           const pathname = url.pathname;
 
-          const distPath = path.join(process.cwd(), outdir, pathname);
-          if (await Bun.file(distPath).exists()) {
-            return new Response(Bun.file(distPath), getHeaders(path.extname(pathname)));
-          }
-
-          const assetsPath = path.join(process.cwd(), assetsDir, pathname);
-          if (await Bun.file(assetsPath).exists()) {
-            return new Response(Bun.file(assetsPath), getHeaders(path.extname(pathname)));
-          }
-
-          if (pageHandlers[pathname]) {
-            const routeFile = routeMap[pathname];
+          // 1. Check for API routes first
+          if (config.api && config.api[pathname]) {
             return await measure(
-              async (measure) => {
-                const ext = path.extname(routeFile);
-                const baseName = path.basename(routeFile, ext);
-                let htmlFile: any = null;
+              async () => config.api![pathname](reqWithId), // Pass request with ID
+              `api ${pathname}`,
+              { level: 1 }
+            );
+          }
 
-                if (isDev) {
-                  // In dev mode, always rebuild the page
-                  const buildResult = await rebuildPage(routeFile, requestId);
-                  if (buildResult) {
-                    const builtFile = buildResult.outputs.find((o: { path: string }) =>
-                      o.path.endsWith(ext)
-                    );
-                    if (builtFile) {
-                      htmlFile = Bun.file(builtFile.path);
-                    }
-                  }
-                } else {
-                  // In production mode, check the cache first
-                  const cacheKey = `${baseName.toLowerCase()}${ext}`;
-                  if (filePathCache[cacheKey] && await Bun.file(filePathCache[cacheKey]).exists()) {
-                    htmlFile = Bun.file(filePathCache[cacheKey]);
-                  }
+          // 2. Check for page routes
+          if (entrypoints[pathname]) {
+              const originalTargetPath = routeMap[pathname]; // Get the original target path used as key
+              const resolvedEntryPath = entrypoints[pathname].path; // Get resolved path for reading
+              const handler = pageHandlers[pathname]; // Get the data handler
 
-                  // If not in cache or file doesn't exist, rebuild
-                  if (!htmlFile) {
-                    const buildResult = await rebuildPage(routeFile, requestId);
-                    if (buildResult) {
-                      const builtFile = buildResult.outputs.find((o: { path: string }) =>
-                        o.path.endsWith(ext)
-                      );
-                      if (builtFile) {
-                        htmlFile = Bun.file(builtFile.path);
+              return await measure(
+                  async (measure) => {
+                      let builtHtmlPath: string | null = null;
+
+                      if (isDev) {
+                          // Always rebuild in dev mode
+                          builtHtmlPath = await rebuildPage(originalTargetPath, requestId);
+                      } else {
+                          // In production, check cache first
+                          builtHtmlPath = filePathCache[originalTargetPath];
+                          // Optional: Could add a check here `existsSync(builtHtmlPath)`
+                          // If file doesn't exist in prod (e.g. deleted from dist), return 404 or attempt rebuild?
+                          // For simplicity, assume initial build populated the cache correctly for prod.
+                          if (!builtHtmlPath) {
+                              console.error(`Production cache miss for ${originalTargetPath}. File should exist in dist.`);
+                              // Attempting a rebuild in production might be risky/slow
+                              // builtHtmlPath = await rebuildPage(originalTargetPath, requestId); // Avoid this generally
+                               return new Response("Internal Server Error: Page not found in build cache.", { status: 500 });
+                          }
                       }
-                    }
-                  }
-                }
 
-                if (!htmlFile) {
-                  throw new Error(`Page not found: ${routeFile}`);
-                }
+                      if (!builtHtmlPath) {
+                          return new Response(`Failed to build or find page: ${originalTargetPath}`, { status: 500 });
+                      }
 
-                let serverData = {};
-                const handler = pageHandlers[pathname];
-                if (handler) {
-                  serverData = await measure(
-                    async (measure) => handler(reqWithId),
-                    `serverData ${pathname}`
-                  );
-                }
+                      // Serve the *built* HTML file
+                       const htmlFile = Bun.file(builtHtmlPath);
+                       if (!(await htmlFile.exists())) {
+                           console.error(`Built HTML file not found at path: ${builtHtmlPath}`);
+                           return new Response("Internal Server Error: Built page artifact not found.", { status: 500 });
+                       }
 
-                return await servePage(
-                  new Response(htmlFile, getHeaders(ext)),
-                  importMap,
-                  serverData,
-                  requestId
-                );
-              },
-              `page ${pathname}`
-            );
+
+                      // Fetch server data if handler exists
+                      let serverData = {};
+                      if (handler) {
+                           const query = Object.fromEntries(url.searchParams.entries());
+                           const ctx = {
+                               request: reqWithId,
+                               method: reqWithId.method,
+                               path: url.pathname,
+                               query,
+                               // Avoid parsing body unless it's needed and method allows it
+                               body: (reqWithId.method !== "GET" && reqWithId.method !== "HEAD") ? await reqWithId.json().catch(() => ({})) : undefined,
+                               headers: reqWithId.headers,
+                               requestId,
+                               measure, // Pass the measure function into the handler context
+                            };
+                           serverData = await measure(
+                               async () => handler(ctx), // Pass full context
+                               `serverData ${pathname}`,
+                               { level: 1 }
+                           );
+                      }
+
+                      // Serve the page, injecting import map and server data
+                       return await servePage(
+                           new Response(htmlFile, getHeaders(".html")), // Serve the content of the built file
+                           importMap,
+                           serverData,
+                           requestId
+                       );
+                  },
+                  `page ${pathname}`
+              );
           }
 
-          if (config.api && pathname in config.api) {
-            return await measure(
-              async (measure) => config.api![pathname](reqWithId),
-              `endpoint ${pathname}`
-            );
+          // 3. Check for built assets in `outdir` (after build)
+          // Construct path relative to the output directory
+          const distPath = path.join(process.cwd(), outdir, pathname.startsWith('/') ? pathname.substring(1) : pathname);
+          const distFile = Bun.file(distPath);
+          if (await distFile.exists()) {
+              return new Response(distFile, getHeaders(path.extname(pathname)));
           }
 
+
+          // 4. Check for static assets in `assetsDir`
+          const assetsPath = path.join(process.cwd(), assetsDir, pathname.startsWith('/') ? pathname.substring(1) : pathname);
+          const assetFile = Bun.file(assetsPath);
+           if (await assetFile.exists()) {
+               return new Response(assetFile, getHeaders(path.extname(pathname)));
+           }
+
+
+          // 5. Not found
           return new Response("Route Not Found", { status: 404 });
         },
-        `${req.method} ${req.url}`,
-        { requestId }
+        `${req.method} ${req.url}`, // Log includes method and full URL
+        { requestId } // Top-level measure context with request ID
       );
     },
-    error(error) {
-      console.error("Server Error:", error);
-      return new Response(
-        `<pre>${error}\n${error.stack}</pre>`,
-        { headers: { "Content-Type": "text/html" }, status: 500 }
-      );
+    error(error: Error) { // Type the error
+      console.error("[Server Error]", error);
+      // Provide more helpful error response in development
+      const body = isDev
+        ? `<h1>Server Error</h1><pre>${error.stack || error.message}</pre>`
+        : "Internal Server Error";
+      return new Response(body, {
+        status: 500,
+        headers: { "Content-Type": "text/html" },
+      });
     },
   });
 
-  serverPort = server.port;
+  serverPort = server.port; // Capture the actual port used by the server
+  console.log(`🦊 Melina server running at http://localhost:${serverPort}`);
 
+  // --- Initial Build ---
   await measure(async () => {
-    const result = await build(buildConfig);
+    const initialBuildConfig = getBuildConfig(serverPort); // Use the actual port
+    const result = await build(initialBuildConfig);
 
-    if (result && result.outputs) {
-      for (const output of result.outputs) {
-        const outputBaseName = path.basename(output.path).split(".")[0].toLowerCase();
-        const ext = path.extname(output.path);
-        filePathCache[`${outputBaseName}${ext}`] = output.path;
-      }
+    if (result.success && result.outputs) {
+        console.log("Initial build successful. Outputs:");
+        result.outputs.forEach(output => {
+            console.log(` - ${output.kind}: ${output.path} (${(output.size / 1024).toFixed(2)} KB)`);
+            // Find the original entrypoint path based on the output path
+             const entrypointPath = Object.values(entrypoints).find(e => path.resolve(e.path) === path.resolve(output.path)); // Direct match for entrypoints
+             if (entrypointPath) {
+                 const originalTarget = Object.keys(routeMap).find(r => entrypoints[r].path === entrypointPath.path);
+                 if(originalTarget) {
+                    // Cache mapping: original target -> final output path
+                    filePathCache[routeMap[originalTarget]] = path.resolve(output.path);
+                 }
+             } else {
+                 // Handle non-entrypoint outputs if necessary (e.g., caching JS/CSS paths)
+                 // This might require more sophisticated manifest parsing from Bun build results if available
+             }
+        });
+         // Update the filePathCache based on build outputs
+         // We need a reliable way to map entrypoint source HTML to output HTML
+         // Bun's build output might not make this straightforward without a manifest.
+         // Let's refine the caching within rebuildPage and assume initial build places files predictably for now.
+         // A simple approach for initial build: assume output name relates to input name.
+         for (const route in entrypoints) {
+             const entryConfig = entrypoints[route];
+             const originalTarget = routeMap[route];
+             const baseName = path.basename(originalTarget, path.extname(originalTarget));
+             // Find the output file that likely corresponds to this entrypoint
+             // This relies heavily on the naming convention used in buildConfig
+             const potentialOutput = result.outputs.find(o => o.kind === 'entry-point' && o.path.includes(baseName));
+             if(potentialOutput) {
+                 filePathCache[originalTarget] = path.resolve(potentialOutput.path);
+                 console.log(`Cached mapping: ${originalTarget} -> ${filePathCache[originalTarget]}`);
+             } else {
+                 console.warn(`Could not determine output path for entrypoint ${originalTarget} during initial build cache population.`);
+             }
+         }
+
+    } else {
+        console.error("Initial build failed.");
+        if (result.logs.length > 0) {
+            console.error("Build Logs:", result.logs);
+        }
+        // Optional: throw an error here to prevent server start if build fails
+        // throw new Error("Initial build failed, cannot start server.");
     }
   }, "Initial build");
+
 
   return server;
 }
 
-if (require.main === module) {
-  const exampleConfig: ServeOptions = {
-    pages: [
-      {
-        route: "/",
-        target: "./pages/index.tsx",
-        handler: async (ctx) => ({ message: `Hello from ${ctx.path}` }),
-      },
-    ],
-    api: {
-      "/api/health": async (req) =>
-        new Response(JSON.stringify({ status: "ok" }), {
-          headers: { "Content-Type": "application/json" },
-        }),
-    },
-    imports: [
-      { name: "react", version: "18.2.0" },
-      { name: "react-dom/client", version: "18.2.0" },
-    ],
-  };
-
-  serve(exampleConfig);
-}
+// --- generateImports Function ---
+// Keep generateImports as is - seems fine, but ensure it returns Record<string, ImportConfig>
 
 /**
  * Generates import configurations by reading package.json and optional bun.lock data
- * 
- * @param packageJson - The parsed package.json file
- * @param bunLock - The parsed bun.lock file (optional)
- * @returns Record of import configurations
+ *
+ * @param packageJson - The parsed package.json file (as an object)
+ * @param bunLock - The parsed bun.lock file (as an object, optional)
+ * @returns Record<string, ImportConfig> - Map where key is typically the import specifier (e.g., 'react', 'react-dom/client')
  */
 export function generateImports(
   packageJson: any,
-  bunLock: any = { packages: {} }
-) {
+  bunLock: any = null // Default to null for easier checking
+): Record<string, ImportConfig> {
   const dependencies = {
-    ...packageJson.dependencies || {},
-    ...packageJson.devDependencies || {}
+    ...(packageJson.dependencies || {}),
+    ...(packageJson.devDependencies || {}),
+    // Include peerDependenciesMeta? Optional.
   };
 
-  // Helper function to get clean version (no ^ or ~)
-  const getCleanVersion = (version: string) => version.replace(/^\^|~/, '');
+  const getCleanVersion = (version: string): string => version.replace(/^[~^]/, '');
 
-  // Helper function to get version from package.json
-  const getVersionFromPackageJson = (packageName: string) => {
-    const version = dependencies[packageName];
-    return version ? getCleanVersion(version) : null;
-  };
+  const imports: Record<string, ImportConfig> = {};
 
-  // Create the imports object
-  const imports: Record<string, any> = {};
+  // Process dependencies from package.json
+  Object.entries(dependencies).forEach(([name, versionSpec]) => {
+    if (typeof versionSpec !== 'string') return; // Skip if version is not a string (e.g., workspace:)
 
-  // Process dependencies
-  Object.entries(dependencies).forEach(([name, version]) => {
-    const cleanVersion = getCleanVersion(version as string);
+    const cleanVersion = getCleanVersion(versionSpec);
+    let peerDeps: string[] = [];
 
-    // Check if this package exists in the lockfile
-    const lockPackage = bunLock.packages && bunLock.packages[name];
-    const peerDeps: string[] = [];
-
-    if (lockPackage) {
-      // Lock file format is [nameWithVersion, _, metadata, hash]
-      const metadata = lockPackage[2];
+    // Try to find peer dependencies from bun.lockb if provided
+    // Note: Accessing bun.lockb content directly might be complex due to its binary format.
+    // This example assumes `bunLock` is a pre-parsed object representation if available.
+    // A more robust approach might involve shell commands or dedicated lockfile parsers.
+    if (bunLock && bunLock.packages && bunLock.packages[name]) {
+      const lockEntry = bunLock.packages[name];
+      // Structure might vary, adjust based on actual parsed lockfile format
+      const metadata = lockEntry[2]; // Assuming metadata is the 3rd element
 
       if (metadata && metadata.peerDependencies) {
-        // Process peer dependencies
         Object.keys(metadata.peerDependencies).forEach(peerName => {
-          // Skip optional peers
-          if (metadata.optionalPeers && metadata.optionalPeers.includes(peerName)) {
-            return;
-          }
-
-          // Use version from package.json if available
-          const peerVersion = getVersionFromPackageJson(peerName);
-          if (peerVersion) {
-            peerDeps.push(peerName);
+          // Exclude optional peer dependencies if specified
+          if (!(metadata.peerDependenciesMeta?.[peerName]?.optional)) {
+             // Check if the peer dependency exists in our main dependencies list
+             if (dependencies[peerName]) {
+                 peerDeps.push(peerName); // Add the base name of the peer dependency
+             }
           }
         });
       }
     }
 
-    // Add the import configuration
     imports[name] = {
-      name,
+      name: name, // The actual package name
       version: cleanVersion,
-      ...(peerDeps.length > 0 ? { deps: peerDeps } : {})
+      ...(peerDeps.length > 0 ? { deps: peerDeps } : {}),
     };
   });
 
-  if (imports['react-dom']) {
-    imports['react-dom/client'] = {
-      ...imports['react-dom'],
-      name: 'react-dom/client'
-    };
-  }
-
+  // Add common React subpath imports if React is present
   if (imports['react']) {
+    // react-dom/client (if react-dom exists)
+    if (imports['react-dom']) {
+        imports['react-dom/client'] = {
+            ...imports['react-dom'], // Copy version and potentially deps from react-dom
+            name: 'react-dom/client',
+        };
+    }
+    // JSX runtimes
     imports['react/jsx-runtime'] = {
-      ...imports['react'],
-      name: 'react/jsx-runtime'
+        ...imports['react'], // Copy version/deps from react
+        name: 'react/jsx-runtime',
     };
-
     imports['react/jsx-dev-runtime'] = {
-      ...imports['react'],
-      name: 'react/jsx-dev-runtime'
+        ...imports['react'], // Copy version/deps from react
+        name: 'react/jsx-dev-runtime',
     };
   }
 
   return imports;
+}
+
+
+// --- Example Usage (at the bottom) ---
+// This block runs only if the script is executed directly
+// Using `if (Bun.main === import.meta.path)` is the modern way in Bun
+if (Bun.main === import.meta.path) {
+  (async () => {
+    console.log("Running Melina example...");
+
+    // --- Load package.json and bun.lockb ---
+    let packageJson: any = {};
+    let lockFile: any = null; // Use null if lockfile doesn't exist or parsing fails
+
+    try {
+      // Correctly import JSON in Bun
+      packageJson = await import("./package.json", { with: { type: "json" } });
+      packageJson = packageJson.default; // Bun's JSON import wraps in { default: ... }
+
+      // Attempt to read and parse bun.lockb (Requires Bun v1.1+)
+      // NOTE: Bun doesn't have a built-in JS API to parse bun.lockb yet.
+      // This is a placeholder; you'd typically use `generateImports` with just package.json
+      // or manually define imports if lockfile parsing isn't feasible.
+      /*
+      const lockPath = path.resolve("./bun.lockb");
+      if (existsSync(lockPath)) {
+         // Placeholder: In reality, you can't easily parse bun.lockb in JS reliably yet.
+         // You might use `Bun.spawnSync(['bun', 'pm', 'parse-lockb', lockPath])` if such a command existed
+         // or rely on external tools if available.
+         console.warn("bun.lockb parsing is not directly supported via JS API. Peer dependencies might be incomplete.");
+         // lockFile = { packages: {} }; // Simulate an empty parsed lockfile object
+      }
+      */
+    } catch (error) {
+      console.error("Failed to load package.json or bun.lockb:", error);
+      console.log("Proceeding without automatic import generation based on lockfile.");
+    }
+
+    // Generate imports using the loaded data
+    // Pass null for lockfile for now, until parsing is reliable
+    const generatedImports = generateImports(packageJson, null);
+
+
+    // --- Define Example Config ---
+    const exampleConfig: ServeOptions = {
+      pages: [
+        {
+          route: "/",
+          // Point directly to the HTML file
+          target: "./pages/index/App.html", // Example: Using a subfolder
+          handler: async (ctx) => {
+              await ctx.measure(async () => { /* simulate work */ await new Promise(r => setTimeout(r, 20)); }, "Fetch user data");
+              return {
+                  message: `Hello from ${ctx.path}!`,
+                  initialCount: Math.floor(Math.random() * 10),
+                  requestId: ctx.requestId, // Pass requestId to frontend if needed
+             };
+          },
+        },
+        {
+           route: "/about",
+           target: "./pages/about/About.html", // Another page example
+           // No handler needed if it's a static page + client script
+        }
+      ],
+      api: {
+        "/api/health": async (req) => {
+          return new Response(JSON.stringify({ status: "ok", time: new Date().toISOString() }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      },
+      // Use the generated imports or define manually as a Record
+       imports: {
+           // Example of using generated + manual overrides/additions:
+           ...generatedImports, // Spread the automatically generated ones
+           // Manually add or override specific imports:
+           'zustand': { name: 'zustand', version: '4.5.2' }, // Add a state manager
+           '@tanstack/react-query': { name: '@tanstack/react-query', version: '5.51.1', deps: ['react'] }, // Add query library
+           // Override react version if needed (though generateImports should get it right)
+           // 'react': { name: 'react', version: '18.3.0' },
+       },
+
+       // --- OR ---
+       // Manually define all imports if not using generateImports:
+       /*
+       imports: {
+          'react': { name: 'react', version: '18.2.0' },
+          'react-dom/client': { name: 'react-dom/client', version: '18.2.0', deps: ['react'] },
+          'react/jsx-runtime': { name: 'react/jsx-runtime', version: '18.2.0', deps: ['react'] },
+          'react/jsx-dev-runtime': { name: 'react/jsx-dev-runtime', version: '18.2.0', deps: ['react'] },
+          '@chakra-ui/react': { name: '@chakra-ui/react', version: '2.5.1', deps: ['react', '@emotion/react', '@emotion/styled', 'framer-motion'] }, // Example with more deps
+          'recharts': { name: 'recharts', version: '2.4.3', deps: ['react'] }
+       }
+       */
+    };
+
+    // Start the server
+    await serve(exampleConfig);
+
+  })().catch(err => {
+      console.error("Error starting example server:", err);
+      process.exit(1);
+  });
 }

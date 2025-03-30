@@ -177,16 +177,9 @@ async function servePage(
                     },
                 });
 
-            const transformedResponse = rewriter.transform(response);
-            // Use Response constructor directly with the stream for better performance
-            // const transformedHtml = await transformedResponse.text(); // Avoid buffering if possible
-            return new Response(transformedResponse.body , {
-                 headers: { // Keep original headers and add Content-Type
-                    ...response.headers,
-                   'Content-Type': 'text/html',
-                   'Cache-Control': 'no-cache' // Ensure HTML is not cached heavily
-                 }
-            });
+          const transformedResponse = rewriter.transform(response);
+          const transformedHtml = await transformedResponse.text();
+          return new Response(transformedHtml, getHeaders(".html"));          
         },
         "Transform page",
         { requestId, level: 2 }
@@ -237,7 +230,7 @@ export async function serve(config: ServeOptions) {
   const versionMap: Record<string, string> = {}; // Stores base package name -> version
 
   // --- Import Map Generation Logic ---
-   await measure(async () => {
+   await measure(async (measure) => {
         // First pass: Collect all versions specified for base packages
         Object.entries(config.imports).forEach(([_, imp]) => {
             const baseName = imp.name.startsWith("@") ? imp.name.split("/").slice(0, 2).join("/") : imp.name.split("/")[0];
@@ -256,7 +249,7 @@ export async function serve(config: ServeOptions) {
             const starPrefix = useStarPrefix ? '*' : '';
 
             // Construct base URL using the collected version
-             url = `https://esm.sh/${starPrefix}${imp.name}@${version}`;
+            url = `https://esm.sh/${starPrefix}${imp.name}@${version}`;
 
             let queryParts: string[] = [];
 
@@ -292,9 +285,23 @@ export async function serve(config: ServeOptions) {
 
             if (isDev) queryParts.push("dev"); // Add dev flag for esm.sh sourcemaps etc.
 
-            if (queryParts.length) url += `?${queryParts.join("&")}`;
+            // otherwise, devtools shows an error: Ignored an import map value of "react-dom/": Since specifierKey ended in a slash, so must the address
+            let paramsPrefix = '?';
+            let paramsSuffix = '';
+            if (key.endsWith('/')) {
+              paramsPrefix = '&';
+              paramsSuffix = '/';
+            }
 
-            importMap.imports[key] = url; // Use the provided key ('react', 'react-dom/client', etc.)
+            if (queryParts.length) url += `${paramsPrefix}${queryParts.join("&")}${paramsSuffix}`;
+
+            measure(
+              () => {
+                importMap.imports[key] = url;
+              },
+              `Import for ${key} is ${url}`,
+              { level: 1 }
+            );
         });
     }, "Generate Import Map");
 
@@ -305,7 +312,7 @@ export async function serve(config: ServeOptions) {
     // Entrypoints will be dynamically set during rebuilds, but initial build uses all HTML targets
     entrypoints: Object.values(entrypoints).map(e => e.path),
     outdir,
-    plugins: [plugin()], // Ensure plugin is called if it's a factory function
+    plugins: [plugin], // Ensure plugin is called if it's a factory function
     minify: !isDev,
     target: "browser",
     sourcemap: isDev ? "linked" : undefined, // Only linked sourcemaps in dev
@@ -361,7 +368,7 @@ export async function serve(config: ServeOptions) {
 
                   if (result.success && result.outputs) {
                       // Find the output HTML file corresponding to the entrypoint
-                      const outputHtml = result.outputs.find(o => o.kind === 'entry-point' && path.resolve(o.path) !== resolvedHtmlPath); // Find the *output* html path
+                      const outputHtml = result.outputs.find(o => o.kind === 'entry-point' && path.resolve(o.path) !== resolvedHtmlPath && o.path.endsWith('.html')); // Find the *output* html path
                       if (outputHtml) {
                           const outputPath = path.resolve(outputHtml.path);
                           filePathCache[htmlTargetPath] = outputPath; // Cache: original target path -> output path
@@ -418,6 +425,7 @@ export async function serve(config: ServeOptions) {
           // 2. Check for page routes
           if (entrypoints[pathname]) {
               const originalTargetPath = routeMap[pathname]; // Get the original target path used as key
+              console.log('===> index.ts:415 ~ originalTargetPath', originalTargetPath);
               const resolvedEntryPath = entrypoints[pathname].path; // Get resolved path for reading
               const handler = pageHandlers[pathname]; // Get the data handler
 
@@ -550,17 +558,12 @@ export async function serve(config: ServeOptions) {
                  // This might require more sophisticated manifest parsing from Bun build results if available
              }
         });
-         // Update the filePathCache based on build outputs
-         // We need a reliable way to map entrypoint source HTML to output HTML
-         // Bun's build output might not make this straightforward without a manifest.
-         // Let's refine the caching within rebuildPage and assume initial build places files predictably for now.
-         // A simple approach for initial build: assume output name relates to input name.
+
          for (const route in entrypoints) {
              const entryConfig = entrypoints[route];
              const originalTarget = routeMap[route];
              const baseName = path.basename(originalTarget, path.extname(originalTarget));
-             // Find the output file that likely corresponds to this entrypoint
-             // This relies heavily on the naming convention used in buildConfig
+
              const potentialOutput = result.outputs.find(o => o.kind === 'entry-point' && o.path.includes(baseName));
              if(potentialOutput) {
                  filePathCache[originalTarget] = path.resolve(potentialOutput.path);
@@ -571,21 +574,16 @@ export async function serve(config: ServeOptions) {
          }
 
     } else {
-        console.error("Initial build failed.");
         if (result.logs.length > 0) {
             console.error("Build Logs:", result.logs);
         }
-        // Optional: throw an error here to prevent server start if build fails
-        // throw new Error("Initial build failed, cannot start server.");
+        throw new Error("Initial build failed, cannot start server.");
     }
   }, "Initial build");
 
 
   return server;
 }
-
-// --- generateImports Function ---
-// Keep generateImports as is - seems fine, but ensure it returns Record<string, ImportConfig>
 
 /**
  * Generates import configurations by reading package.json and optional bun.lock data
@@ -596,177 +594,47 @@ export async function serve(config: ServeOptions) {
  */
 export function generateImports(
   packageJson: any,
-  bunLock: any = null // Default to null for easier checking
+  bunLock: any = null
 ): Record<string, ImportConfig> {
   const dependencies = {
     ...(packageJson.dependencies || {}),
-    ...(packageJson.devDependencies || {}),
-    // Include peerDependenciesMeta? Optional.
+    // ...(packageJson.devDependencies || {}),
   };
 
   const getCleanVersion = (version: string): string => version.replace(/^[~^]/, '');
 
   const imports: Record<string, ImportConfig> = {};
 
-  // Process dependencies from package.json
   Object.entries(dependencies).forEach(([name, versionSpec]) => {
-    if (typeof versionSpec !== 'string') return; // Skip if version is not a string (e.g., workspace:)
+    if (typeof versionSpec !== 'string') return;
 
     const cleanVersion = getCleanVersion(versionSpec);
     let peerDeps: string[] = [];
 
-    // Try to find peer dependencies from bun.lockb if provided
-    // Note: Accessing bun.lockb content directly might be complex due to its binary format.
-    // This example assumes `bunLock` is a pre-parsed object representation if available.
-    // A more robust approach might involve shell commands or dedicated lockfile parsers.
     if (bunLock && bunLock.packages && bunLock.packages[name]) {
       const lockEntry = bunLock.packages[name];
-      // Structure might vary, adjust based on actual parsed lockfile format
-      const metadata = lockEntry[2]; // Assuming metadata is the 3rd element
+      const metadata = lockEntry[2];
 
       if (metadata && metadata.peerDependencies) {
         Object.keys(metadata.peerDependencies).forEach(peerName => {
-          // Exclude optional peer dependencies if specified
           if (!(metadata.peerDependenciesMeta?.[peerName]?.optional)) {
-             // Check if the peer dependency exists in our main dependencies list
              if (dependencies[peerName]) {
-                 peerDeps.push(peerName); // Add the base name of the peer dependency
+                 peerDeps.push(peerName);
              }
           }
         });
       }
     }
 
-    imports[name] = {
-      name: name, // The actual package name
+    // Import maps supports trailing slash that can not work with URL search params friendly. To fix this issue, esm.sh provides a special format for import URL that allows you to use query params with trailing slash: change the query prefix ? to & and put it after the package version.
+    const nameWithSuffix = `${name}/`;
+
+    imports[nameWithSuffix] = {
+      name: name,
       version: cleanVersion,
       ...(peerDeps.length > 0 ? { deps: peerDeps } : {}),
     };
   });
 
-  // Add common React subpath imports if React is present
-  if (imports['react']) {
-    // react-dom/client (if react-dom exists)
-    if (imports['react-dom']) {
-        imports['react-dom/client'] = {
-            ...imports['react-dom'], // Copy version and potentially deps from react-dom
-            name: 'react-dom/client',
-        };
-    }
-    // JSX runtimes
-    imports['react/jsx-runtime'] = {
-        ...imports['react'], // Copy version/deps from react
-        name: 'react/jsx-runtime',
-    };
-    imports['react/jsx-dev-runtime'] = {
-        ...imports['react'], // Copy version/deps from react
-        name: 'react/jsx-dev-runtime',
-    };
-  }
-
   return imports;
-}
-
-
-// --- Example Usage (at the bottom) ---
-// This block runs only if the script is executed directly
-// Using `if (Bun.main === import.meta.path)` is the modern way in Bun
-if (Bun.main === import.meta.path) {
-  (async () => {
-    console.log("Running Melina example...");
-
-    // --- Load package.json and bun.lockb ---
-    let packageJson: any = {};
-    let lockFile: any = null; // Use null if lockfile doesn't exist or parsing fails
-
-    try {
-      // Correctly import JSON in Bun
-      packageJson = await import("./package.json", { with: { type: "json" } });
-      packageJson = packageJson.default; // Bun's JSON import wraps in { default: ... }
-
-      // Attempt to read and parse bun.lockb (Requires Bun v1.1+)
-      // NOTE: Bun doesn't have a built-in JS API to parse bun.lockb yet.
-      // This is a placeholder; you'd typically use `generateImports` with just package.json
-      // or manually define imports if lockfile parsing isn't feasible.
-      /*
-      const lockPath = path.resolve("./bun.lockb");
-      if (existsSync(lockPath)) {
-         // Placeholder: In reality, you can't easily parse bun.lockb in JS reliably yet.
-         // You might use `Bun.spawnSync(['bun', 'pm', 'parse-lockb', lockPath])` if such a command existed
-         // or rely on external tools if available.
-         console.warn("bun.lockb parsing is not directly supported via JS API. Peer dependencies might be incomplete.");
-         // lockFile = { packages: {} }; // Simulate an empty parsed lockfile object
-      }
-      */
-    } catch (error) {
-      console.error("Failed to load package.json or bun.lockb:", error);
-      console.log("Proceeding without automatic import generation based on lockfile.");
-    }
-
-    // Generate imports using the loaded data
-    // Pass null for lockfile for now, until parsing is reliable
-    const generatedImports = generateImports(packageJson, null);
-
-
-    // --- Define Example Config ---
-    const exampleConfig: ServeOptions = {
-      pages: [
-        {
-          route: "/",
-          // Point directly to the HTML file
-          target: "./pages/index/App.html", // Example: Using a subfolder
-          handler: async (ctx) => {
-              await ctx.measure(async () => { /* simulate work */ await new Promise(r => setTimeout(r, 20)); }, "Fetch user data");
-              return {
-                  message: `Hello from ${ctx.path}!`,
-                  initialCount: Math.floor(Math.random() * 10),
-                  requestId: ctx.requestId, // Pass requestId to frontend if needed
-             };
-          },
-        },
-        {
-           route: "/about",
-           target: "./pages/about/About.html", // Another page example
-           // No handler needed if it's a static page + client script
-        }
-      ],
-      api: {
-        "/api/health": async (req) => {
-          return new Response(JSON.stringify({ status: "ok", time: new Date().toISOString() }), {
-            headers: { "Content-Type": "application/json" },
-          });
-        },
-      },
-      // Use the generated imports or define manually as a Record
-       imports: {
-           // Example of using generated + manual overrides/additions:
-           ...generatedImports, // Spread the automatically generated ones
-           // Manually add or override specific imports:
-           'zustand': { name: 'zustand', version: '4.5.2' }, // Add a state manager
-           '@tanstack/react-query': { name: '@tanstack/react-query', version: '5.51.1', deps: ['react'] }, // Add query library
-           // Override react version if needed (though generateImports should get it right)
-           // 'react': { name: 'react', version: '18.3.0' },
-       },
-
-       // --- OR ---
-       // Manually define all imports if not using generateImports:
-       /*
-       imports: {
-          'react': { name: 'react', version: '18.2.0' },
-          'react-dom/client': { name: 'react-dom/client', version: '18.2.0', deps: ['react'] },
-          'react/jsx-runtime': { name: 'react/jsx-runtime', version: '18.2.0', deps: ['react'] },
-          'react/jsx-dev-runtime': { name: 'react/jsx-dev-runtime', version: '18.2.0', deps: ['react'] },
-          '@chakra-ui/react': { name: '@chakra-ui/react', version: '2.5.1', deps: ['react', '@emotion/react', '@emotion/styled', 'framer-motion'] }, // Example with more deps
-          'recharts': { name: 'recharts', version: '2.4.3', deps: ['react'] }
-       }
-       */
-    };
-
-    // Start the server
-    await serve(exampleConfig);
-
-  })().catch(err => {
-      console.error("Error starting example server:", err);
-      process.exit(1);
-  });
 }

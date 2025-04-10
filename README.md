@@ -2,6 +2,8 @@
 
 A lightweight, type-safe server framework for Bun with automatic performance tracking, server-side data injection, and simplified frontend dependency management.
 
+<img width="285" alt="Screenshot 2025-04-10 at 08 00 05" src="https://github.com/user-attachments/assets/4936f1ea-a607-44a1-86a1-61cd06dee300" />
+
 ## Features
 
 -   **Flexible Page Routing**: Serve HTML pages from any location.
@@ -299,7 +301,7 @@ function Dashboard() {
 // ... render the App
 ```
 
-### Performance Tracking (`measure` and `ctx.measure`)
+### Logging & Observability
 
 Melina automatically wraps requests and server data handlers with performance measurement. You can add detailed tracking to your own asynchronous operations using the `measure` function (available globally or via `ctx.measure` in handlers).
 
@@ -477,36 +479,35 @@ serve({
 });
 ```
 
-## How It Works (Simplified)
+## How It Works
 
 ```mermaid
 graph TD
-    A[Browser Request] --> B{Melina Server (Bun)}
-    B --> C{Match Route?}
-    C -->|API Route| G[Execute API Handler]
-    C -->|Page Route| F{Execute Page Handler (if exists)}
-    C -->|Static Asset Path| D[Serve from ./assets]
-    C -->|Built Asset Path| E[Serve from ./dist]
-    C -->|Not Found| Z[Return 404]
+    A[Browser Request] --> B[Melina Server Bun];
+    B --> C{Match Route?};
+    C -->|API Route| G[Execute API Handler];
+    C -->|Page Route| F{Execute Page Handler?};
+    C -->|Static Asset Path| D[Serve from ./assets];
+    C -->|Built Asset Path| E[Serve from ./dist];
+    C -->|Not Found| Z[Return 404];
 
-    F --> H[Get Server Data]
-    H --> I{Dev or Prod?}
-    I -->|Dev Mode| J[Rebuild Page (HTML + Client Script)]
-    I -->|Prod Mode| K[Get Path from Build Cache]
+    F --> H[Get Server Data];
+    H --> I{Dev or Prod?};
+    I -->|Dev Mode| J[Rebuild Page];
+    I -->|Prod Mode| K[Get Path from Build Cache];
 
-    J --> L[Built HTML Path]
-    K --> L
+    J --> L[Built HTML File];
+    K --> L;
 
-    L --> M[Read Built HTML File]
-    M --> N[Inject Import Map (Head)]
-    M --> O[Inject serverData (Body)]
-    O --> P[Stream Response to Browser]
+    L --> L2[Inject Import Map to Head];
+    L2 --> L3[Inject serverData to Body];
+    L3 --> P[Stream Response to Browser];
 
-    G --> Q[Return API Response]
-    D --> P
-    E --> P
-    Q --> P
-    Z --> P
+    G --> Q[Return API Response];
+    D --> P;
+    E --> P;
+    Q --> P;
+    Z --> P;
 ```
 
 ## Development vs. Production

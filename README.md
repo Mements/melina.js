@@ -7,13 +7,14 @@ A lightweight, streaming-first web framework for Bun that delivers blazing fast 
 
 ## Features
 
-  - 🚀 **Simplified Setup** - Define a server handler and start building.
-  - 🌊 **Streaming by Default** - Return AsyncGenerators from your handler for immediate Time to First Contentful Paint.
-  - 🧩 **Dynamic Import Maps** - Generate modern ES module import maps from your `package.json` on the fly.
-  - ⚡ **On-Demand Asset Building** - Client-side JavaScript and CSS are built when requested during development, and cached in production.
-  - 📏 **Framework Agnostic** - Works with React, Vue, Svelte, or vanilla JS on the client-side.
-  - 📊 **Built-in Performance Measurement** - Debug and optimize with ease using the `measure` utility.
-  - 🔥 **Tailwind CSS JIT** - Seamless Tailwind CSS integration for your assets.
+  - **Simplified Setup** - Define a server handler and start building.
+  - **Streaming by Default** - Return AsyncGenerators from your handler for immediate Time to First Contentful Paint.
+  - **Dynamic Import Maps** - Generate modern ES module import maps from your `package.json` on the fly.
+  - **On-Demand Asset Building** - Client-side JavaScript and CSS are built when requested during development, and cached in production.
+  - **Framework Agnostic** - Works with React, Vue, Svelte, or vanilla JS on the client-side.
+  - **Built-in Performance Measurement** - Debug and optimize with ease using the `measure` utility.
+  - **Tailwind CSS JIT** - Seamless Tailwind CSS integration for your assets.
+  - 🔥 **NEW: MCP Server** - MCP (Model Context Protocol)
 
 ## Installation
 
@@ -21,252 +22,15 @@ A lightweight, streaming-first web framework for Bun that delivers blazing fast 
 bun add melinajs
 ```
 
-## Quick Start (React with Tailwind CSS Example)
+## Quick Start
 
-This example demonstrates serving a React application with Tailwind CSS.
+[MCP Example](./examples/mcp/server.ts)
 
-1.  **Install dependencies for the example:**
+[Web Example (Vanilla JS)](./examples/vanilla/index.ts)
 
-    ```bash
-    bun add react react-dom react-client
-    bun add -d @types/react @types/react-dom tailwindcss bun-plugin-tailwind
-    ```
+[Web Example (React with Tailwind CSS)](./examples/react-tailwind/index.ts)
 
-2.  **Create your React App Component (`App.tsx`):**
-
-    ```tsx
-    // ./App.tsx
-    import React from 'react';
-
-    // Make sure serverData is typed appropriately for your app
-    // For this example, we expect { now: string }
-    interface ServerData {
-      now?: string;
-      message?: string;
-    }
-
-    interface AppProps {
-      serverData: ServerData;
-    }
-
-    const App: React.FC<AppProps> = ({ serverData }) => {
-      return (
-        <div className="p-4">
-          <h1 className="text-2xl font-bold mb-2">Hello from Melina.js & React!</h1>
-          <p className="text-lg">Data from server:</p>
-          <pre className="bg-gray-100 p-3 rounded mt-1 text-sm">
-            {JSON.stringify(serverData, null, 2)}
-          </pre>
-        </div>
-      );
-    };
-
-    export default App;
-    ```
-
-3.  **Create a client-side entrypoint (`App.client.tsx`):**
-
-    ```tsx
-    // ./App.client.tsx
-    import React from 'react';
-    import { createRoot } from "react-dom/client";
-    import App from './App';
-
-    // Assuming SERVER_DATA is injected by your server-side stream
-    declare global {
-      interface Window {
-        SERVER_DATA: any;
-      }
-    }
-
-    const serverData = window.SERVER_DATA || { message: "No server data received" };
-
-    // Optional: Remove a loading indicator if you have one
-    // document.querySelector('#loading')!.remove();
-
-    createRoot(document.getElementById("root")!).render(
-      <React.StrictMode>
-        <App serverData={serverData} />
-      </React.StrictMode>
-    );
-    ```
-
-4.  **Create your Tailwind CSS entrypoint (`App.css`):**
-    *(This file tells Bun's Tailwind plugin what to process)*
-
-    ```css
-    /* ./App.css */
-    @import "tailwindcss" source("./"); /* Adjust source if your tailwind.config.js is elsewhere or includes other content paths */
-    ```
-
-    *Ensure your `tailwind.config.js` `content` array points to your `.tsx` files, e.g., `content: ["./*.{html,js,jsx,ts,tsx}"]`*
-
-5.  **Create your server file (`server.ts`):**
-
-    ```typescript
-    // server.ts
-    import path from "path";
-    import { useServer, measure } from "melinajs"; // Assuming melinajs is in node_modules
-
-    const { serve, asset, imports } = useServer();
-
-    // Generate import maps for client-side dependencies from your package.json
-    // For React, you'd typically need 'react', 'react-dom/client', and 'react/jsx-dev-runtime' (for dev)
-    const generatedImportMaps = await measure(
-      async () => imports(['react', 'react-dom/client', 'react/jsx-dev-runtime']),
-      "Generate Import Maps"
-    );
-
-    const importMapScript = `
-        <script type="importmap">
-          ${JSON.stringify(generatedImportMaps, null, 2)}
-        </script>
-    `;
-
-    async function* streamReactPage(req: Request) {
-      const requestId = req.headers.get("X-Request-ID") || "unknown";
-      yield `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>Melina + React</title>
-          ${importMapScript}
-          <script src="${await asset(path.join(__dirname, 'App.client.tsx'))}" type="module" defer></script>
-          <link rel="stylesheet" href="${await asset(path.join(__dirname, 'App.css'))}" />
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        </head>
-        <body>
-          <div id="root">
-            <div class="p-4 text-xl text-gray-500">Loading app...</div>
-          </div>
-      `;
-
-      // Simulate some async data fetching
-      const serverData = await measure(async () => {
-        await Bun.sleep(50); // Simulate delay
-        return {
-          now: new Date().toISOString(),
-          message: "Data fetched on the server!"
-        };
-      }, "Fetch Server Data", { requestId });
-
-      yield `
-          <script>
-            window.SERVER_DATA = ${JSON.stringify(serverData)};
-          </script>
-        </body>
-        </html>
-      `;
-    }
-
-    serve(async (req: Request) => {
-      const url = new URL(req.url);
-      if (url.pathname === '/') {
-        return streamReactPage(req);
-      }
-      // Add other routes or API endpoints here
-      if (url.pathname === '/api/hello') {
-        return Response.json({ message: "Hello from API" });
-      }
-      return new Response('Not Found', { status: 404 });
-    });
-
-    console.log("React example server running. Open http://localhost:3000");
-    ```
-
-6.  **Update `package.json` (ensure `type: "module"`):**
-    Your `package.json` should look something like this:
-
-    ```json
-    {
-      "name": "melina-react-example",
-      "type": "module",
-      "scripts": {
-        "dev": "bun run server.ts",
-        "start": "NODE_ENV=production bun run server.ts"
-      },
-      "dependencies": {
-        "melinajs": "latest", // or specific version
-        "react": "^18.2.0", // or ^19
-        "react-dom": "^18.2.0", // or ^19
-        "react-client": "latest" // or specific version for React 19
-      },
-      "devDependencies": {
-        "@types/bun": "latest",
-        "@types/react": "^18.2.0",
-        "@types/react-dom": "^18.2.0",
-        "bun-plugin-tailwind": "^0.0.15",
-        "tailwindcss": "^3.3.0", // or latest
-        "typescript": "^5.0.0"
-      },
-      "peerDependencies": {
-        "typescript": "^5"
-      }
-    }
-    ```
-
-7.  **Start your server:**
-
-    ```bash
-    bun run dev
-    ```
-
-    Open `http://localhost:3000` (or your configured port) in your browser.
-
-## Quick Start (Vanilla JS Streaming Example)
-
-1.  **Create your server file (`server_vanilla.ts`):**
-
-    ```typescript
-    // server_vanilla.ts
-    import { useServer } from "melinajs";
-
-    const { serve } = useServer();
-
-    async function* streamCounterPage() {
-        yield `
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Melina Vanilla Stream</title>
-            <meta charset="UTF-8">
-            <style> body { font-family: sans-serif; display: flex; flex-direction: column-reverse; align-items: center; font-size: 24px; } </style>
-          </head>
-          <body>
-            <p>Streaming server time:</p>
-        `;
-        let count = 0;
-        while (true) {
-            yield `<span>Tick ${++count}: ${new Date().toLocaleTimeString()}</span>`;
-            await Bun.sleep(1000); // Stream a new chunk every second
-            if (count > 10) { // Stop after 10 ticks for this example
-              yield `<p>Done streaming.</p></body></html>`;
-              break;
-            }
-        }
-    }
-
-    serve((req: Request) => {
-        const url = new URL(req.url);
-        if (url.pathname === '/vanilla') {
-            return streamCounterPage();
-        }
-        return new Response('Not Found (try /vanilla)', { status: 404 });
-    });
-
-    console.log("Vanilla example server running. Open http://localhost:3000/vanilla");
-    ```
-
-2.  **Start your server:**
-
-    ```bash
-    bun run server_vanilla.ts
-    ```
-
-    Open `http://localhost:3000/vanilla` in your browser.
-
-## How It Works
+## How It Works (Web)
 
 Melina.js simplifies web application delivery with a handler-centric approach:
 
@@ -282,14 +46,10 @@ Melina.js simplifies web application delivery with a handler-centric approach:
 
 This approach significantly improves perceived performance by prioritizing Time to First Contentful Paint (TTFCP) and enabling progressive rendering.
 
-## `useServer()` API
-
-The `useServer()` function is the primary way to interact with Melina.js.
+### API
 
 ```typescript
-import { useServer } from "melinajs";
-
-const { serve, asset, imports } = useServer();
+import { serve, asset, imports } from "melinajs/web";
 ```
 
   - **`serve(handler: (req: Request) => Response | AsyncGenerator<string> | Promise<...>)`**:
@@ -318,12 +78,8 @@ const { serve, asset, imports } = useServer();
 
 ## API Routes
 
-API routes are not specially configured. You implement them directly within your main `serve` handler by checking the `request.url` or `request.method`.
-
 ```typescript
 // server.ts
-// ... (setup useServer)
-
 serve(async (req: Request) => {
   const url = new URL(req.url);
 
@@ -346,47 +102,6 @@ serve(async (req: Request) => {
 
   return new Response("Not Found", { status: 404 });
 });
-```
-
-## Performance Measurement
-
-Melina includes a `measure` utility for tracking the performance of specific operations.
-
-```typescript
-import { measure } from "melinajs";
-
-async function myOperation() {
-  return await measure(
-    async (nestedMeasure) => {
-      // Your main code here
-      await Bun.sleep(50);
-
-      await nestedMeasure(
-        async () => {
-          // Nested operation
-          await Bun.sleep(100);
-        },
-        "Database Query" // Name for this nested operation
-      );
-
-      return { result: "done" };
-    },
-    "My Main Operation", // Name for the overall operation
-    { requestId: "optional-request-id", level: 0 } // Optional context
-  );
-}
-
-myOperation().then(res => console.log("Result:", res));
-```
-
-This produces console output with timing information:
-
-```
-> My Main Operation...
-==> Database Query...
-=<< Database Query ✓ 100.25ms
-< My Main Operation ✓ 150.80ms
-Result: { result: 'done' }
 ```
 
 ## Import Maps Generation

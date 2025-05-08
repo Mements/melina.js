@@ -83,7 +83,7 @@ export async function generateImports(
   let bunLock: any = lockFile;
   if (!bunLock) {
     try {
-      bunLock = (await import(path.resolve(process.cwd(), 'bun.lock'), { assert: { type: 'json' }})).default;
+      bunLock = (await import(path.resolve(process.cwd(), 'bun.lock'), { assert: { type: 'json' } })).default;
     } catch (e) {
       console.warn("No bun.lock file found, proceeding without it.");
     }
@@ -245,7 +245,7 @@ export async function generateImports(
 const buildCache: Record<string, { outputPath: string; content: ArrayBuffer }> = {};
 const builtAssets: Record<string, { content: ArrayBuffer; contentType: string }> = {};
 
-async function asset(filePath: string = ''): Promise<string> {
+export async function asset(filePath: string = ''): Promise<string> {
   const isDev = process.env.NODE_ENV !== "production";
   if (!filePath) {
     return '';
@@ -307,23 +307,24 @@ async function asset(filePath: string = ''): Promise<string> {
   return outputPath;
 }
 
-async function serve(handler: Handler) {
+export async function serve(handler: Handler) {
   const isDev = process.env.NODE_ENV !== "production";
 
   const server = Bun.serve({
+    idleTimeout: 0,
     port: process.env.BUN_PORT ? parseInt(process.env.BUN_PORT, 10) : undefined,
     development: isDev ? {
       hmr: false,
-      console: true,  
+      console: true,
     } : false,
     async fetch(req) {
       const requestId = randomUUID().split("-")[0];
       const reqWithId = req.headers.has("X-Request-ID")
         ? req
         : new Request(req.url, {
-            ...req,
-            headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
-          });
+          ...req,
+          headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
+        });
 
       return await measure(
         async (measure) => {
@@ -393,12 +394,4 @@ async function serve(handler: Handler) {
 
   console.log(`🦊 Melina server running at http://localhost:${server.port}`);
   return server;
-}
-
-export function useServer() {
-  return {
-    serve,
-    asset,
-    imports: generateImports,
-  };
 }

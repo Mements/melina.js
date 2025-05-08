@@ -1,7 +1,5 @@
 import path from "path";
-import { useServer } from "../../index";
-
-const { serve } = useServer();
+import { serve } from "../../src/web";
 
 async function* streamIndexPage() {
     yield `<div style="display: flex; flex-direction: column-reverse; font-size: 24px;">`;

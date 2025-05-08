@@ -65,7 +65,7 @@ export async function measure<T>(
 
 const isDev = process.env.NODE_ENV !== "production";
 
-export async function generateImports(
+export async function imports(
   subpaths: string[] = [],
   pkgJson: any = null,
   lockFile: any = null,
@@ -83,7 +83,7 @@ export async function generateImports(
   let bunLock: any = lockFile;
   if (!bunLock) {
     try {
-      bunLock = (await import(path.resolve(process.cwd(), 'bun.lock'), { assert: { type: 'json' }})).default;
+      bunLock = (await import(path.resolve(process.cwd(), 'bun.lock'), { assert: { type: 'json' } })).default;
     } catch (e) {
       console.warn("No bun.lock file found, proceeding without it.");
     }
@@ -245,7 +245,7 @@ export async function generateImports(
 const buildCache: Record<string, { outputPath: string; content: ArrayBuffer }> = {};
 const builtAssets: Record<string, { content: ArrayBuffer; contentType: string }> = {};
 
-async function asset(filePath: string = ''): Promise<string> {
+export async function asset(filePath: string = ''): Promise<string> {
   const isDev = process.env.NODE_ENV !== "production";
   if (!filePath) {
     return '';
@@ -307,23 +307,24 @@ async function asset(filePath: string = ''): Promise<string> {
   return outputPath;
 }
 
-async function serve(handler: Handler) {
+export async function serve(handler: Handler) {
   const isDev = process.env.NODE_ENV !== "production";
 
   const server = Bun.serve({
+    idleTimeout: 0,
     port: process.env.BUN_PORT ? parseInt(process.env.BUN_PORT, 10) : undefined,
     development: isDev ? {
       hmr: false,
-      console: true,  
+      console: true,
     } : false,
     async fetch(req) {
       const requestId = randomUUID().split("-")[0];
       const reqWithId = req.headers.has("X-Request-ID")
         ? req
         : new Request(req.url, {
-            ...req,
-            headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
-          });
+          ...req,
+          headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
+        });
 
       return await measure(
         async (measure) => {
@@ -381,24 +382,47 @@ async function serve(handler: Handler) {
     },
     error(error: Error) {
       console.error("[Server Error]", error);
+      
+      // Ensure we capture all error details
+      const errorDetails = error instanceof Error ? error.message : String(error);
+      const stackTrace = error instanceof Error ? error.stack : 'No stack trace available';
+      
+      // Use JSON.stringify to properly escape and format the error object
+      const detailedLogs = JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
+
       const body = isDev
-        ? `<h1>Server Error</h1><pre>${error.stack || error.message}</pre>`
+        ? `<!DOCTYPE html>
+           <html>
+             <head>
+               <title>Server Error</title>
+               <style>
+                 body { font-family: monospace; padding: 20px; }
+                 pre { background: #f5f5f5; padding: 15px; overflow-x: auto; }
+                 .error { color: #cc0000; }
+               </style>
+             </head>
+             <body>
+               <h1 class="error">Server Error</h1>
+               <h3>Error Details:</h3>
+               <pre>${errorDetails}</pre>
+               <h3>Stack Trace:</h3>
+               <pre>${stackTrace}</pre>
+               <h3>Debug Information:</h3>
+               <pre>${detailedLogs}</pre>
+             </body>
+           </html>`
         : "Internal Server Error";
+      
       return new Response(body, {
         status: 500,
-        headers: { "Content-Type": "text/html" },
+        headers: { 
+          "Content-Type": "text/html",
+          "Cache-Control": "no-store"
+        },
       });
     },
   });
 
   console.log(`🦊 Melina server running at http://localhost:${server.port}`);
   return server;
-}
-
-export function useServer() {
-  return {
-    serve,
-    asset,
-    imports: generateImports,
-  };
 }

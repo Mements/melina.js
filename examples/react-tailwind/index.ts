@@ -1,38 +1,59 @@
 import path from "path";
-import { useServer } from "../../index";
+import { serve, asset, imports } from "../../src/web";
 
-const { serve, asset, imports } = useServer();
-
-const segmentImportMaps = `
+// 'important': all imports are generated automatically except those with subpath like react-dom/client we need to include manually
+const importMapScript = `
     <script type="importmap">
       ${JSON.stringify(await imports(["react-dom/client", "react/jsx-dev-runtime"]), null, 2)}
     </script>
 `;
 
-async function* streamIndexPage() {
+async function* streamReactPage(req: Request) {
+  const requestId = req.headers.get("X-Request-ID") || "unknown";
   yield `
-        <head>
-            ${segmentImportMaps}
-            <script src="${await asset(path.join(__dirname, 'App.client.tsx'))}" type="module"></script>
-            <link rel="stylesheet" href="${await asset(path.join(__dirname, 'App.css'))}" />
-        </head>
-        <div class="text-xl" id="loading">Loading...</div>
-        <div id="root"></div>
-    `;
-  await Bun.sleep(1000);
-  const serverData = { now: new Date() };
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Melina + React</title>
+      ${importMapScript}
+      <script src="${await asset(path.join(__dirname, 'App.client.tsx'))}" type="module" defer></script>
+      <link rel="stylesheet" href="${await asset(path.join(__dirname, 'App.css'))}" />
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body>
+      <div id="root">
+        <div class="p-4 text-xl text-gray-500">Loading app...</div>
+      </div>
+  `;
+
+  const serverData = await measure(async () => {
+    await Bun.sleep(500); // Simulate delay
+    return {
+      now: new Date().toISOString(),
+      message: "Data fetched on the server!"
+    };
+  }, "Fetch Server Data", { requestId });
+
   yield `
-        <body>
-            <script>
-                window.SERVER_DATA = ${JSON.stringify(serverData)};
-            </script>
-        </body>
-    `;
+      <script>
+        window.SERVER_DATA = ${JSON.stringify(serverData)};
+      </script>
+    </body>
+    </html>
+  `;
 }
 
-serve((req: Request) => {
-  if (new URL(req.url).pathname === '/') {
-    return streamIndexPage();
+const { port } = serve(async (req: Request) => {
+  const url = new URL(req.url);
+  if (url.pathname === '/') {
+    return streamReactPage(req);
+  }
+  // Add other routes or API endpoints here
+  if (url.pathname === '/api/hello') {
+    return Response.json({ message: "Hello from API" });
   }
   return new Response('Not Found', { status: 404 });
 });
+
+console.log("React example server running. Open http://localhost:" + port);

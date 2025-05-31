@@ -245,6 +245,29 @@ export async function imports(
 const buildCache: Record<string, { outputPath: string; content: ArrayBuffer }> = {};
 const builtAssets: Record<string, { content: ArrayBuffer; contentType: string }> = {};
 
+function getContentType(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.png':
+      return 'image/png';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.bmp':
+      return 'image/bmp';
+    case '.svg':
+      return 'image/svg+xml';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
+
+
 export async function asset(filePath: string = ''): Promise<string> {
   const isDev = process.env.NODE_ENV !== "production";
   if (!filePath) {
@@ -256,55 +279,75 @@ export async function asset(filePath: string = ''): Promise<string> {
     throw new Error(`Asset not found: ${filePath}`);
   }
 
+  // Return cached result in production if available
   if (!isDev && buildCache[filePath]) {
     return buildCache[filePath].outputPath;
   }
 
-  let packageJson: any;
-  try {
-    packageJson = (await import(path.resolve(process.cwd(), 'package.json'), { assert: { type: 'json' } })).default;
-  } catch (e) {
-    throw new Error("package.json not found");
+  const ext = path.extname(absolutePath).toLowerCase();
+  const isImage = imageExtensions.includes(ext);
+
+  if (isImage) {
+    // Handle image files directly
+    const file = Bun.file(absolutePath);
+    const content = await file.arrayBuffer();
+    const hash = new Bun.CryptoHasher("sha256").update(new Uint8Array(content)).digest('hex').slice(0, 8);
+    const baseName = path.basename(absolutePath, ext);
+    const outputPath = `/${baseName}-${hash}${ext}`;
+    const contentType = getContentType(ext);
+
+    // Store in cache and assets
+    buildCache[filePath] = { outputPath, content };
+    builtAssets[outputPath] = { content, contentType };
+    return outputPath;
+  } else {
+    // Proceed with build process for non-image files
+    let packageJson: any;
+    try {
+      packageJson = (await import(path.resolve(process.cwd(), 'package.json'), { assert: { type: 'json' } })).default;
+    } catch (e) {
+      throw new Error("package.json not found");
+    }
+
+    const dependencies = { ...(packageJson.dependencies || {}) };
+    const external = Object.keys(dependencies);
+
+    const buildConfig: BuildConfig = {
+      entrypoints: [absolutePath],
+      outdir: undefined, // No disk output
+      plugins: filePath.includes('.css') ? [twPlugin] : [], // Assuming twPlugin is defined
+      minify: !isDev,
+      target: "browser",
+      sourcemap: isDev ? "linked" : undefined,
+      external,
+      define: {
+        "process.env.NODE_ENV": JSON.stringify(isDev ? "development" : "production"),
+      },
+      naming: {
+        entry: "[name]-[hash].[ext]",
+        chunk: "[name]-[hash].[ext]",
+        asset: "[name]-[hash].[ext]",
+      },
+    };
+
+    const result = await bunBuild(buildConfig);
+    if (!result.success || !result.outputs.length) {
+      throw new Error(`Build failed for ${filePath}: ${result.logs.join('\n')}`);
+    }
+
+    const output = result.outputs.length > 1 ? result.outputs.find(o => o.kind === 'entry-point') : result.outputs[0];
+    if (!output) {
+      throw new Error(`No output for ${filePath}`);
+    }
+
+    const content = await output.arrayBuffer();
+    const outputPath = `/${path.basename(output.path).replace(/\\/g, '/')}`;
+    const contentType = output.type ? output.type : output.path.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
+
+    buildCache[filePath] = { outputPath, content };
+    builtAssets[outputPath] = { content, contentType };
+    return outputPath;
   }
-
-  const dependencies = { ...(packageJson.dependencies || {}) };
-  const external = Object.keys(dependencies);
-
-  const buildConfig: BuildConfig = {
-    entrypoints: [absolutePath],
-    outdir: undefined, // No disk output
-    plugins: filePath.includes('.css') ? [twPlugin] : [],
-    minify: !isDev,
-    target: "browser",
-    sourcemap: isDev ? "linked" : undefined,
-    external,
-    define: {
-      "process.env.NODE_ENV": JSON.stringify(isDev ? "development" : "production"),
-    },
-    naming: {
-      entry: "[name]-[hash].[ext]",
-      chunk: "[name]-[hash].[ext]",
-      asset: "[name]-[hash].[ext]",
-    },
-  };
-
-  const result = await bunBuild(buildConfig);
-  if (!result.success || !result.outputs.length) {
-    throw new Error(`Build failed for ${filePath}: ${result.logs.join('\n')}`);
-  }
-
-  const output = result.outputs.length > 1 ? result.outputs.find(o => o.kind === 'entry-point') : result.outputs[0];
-  if (!output) {
-    throw new Error(`No output for ${filePath}`);
-  }
-
-  const content = await output.arrayBuffer();
-  const outputPath = `/${path.basename(output.path).replace(/\\/g, '/')}`;
-  const contentType = output.type ? output.type : output.path.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
-
-  buildCache[filePath] = { outputPath, content };
-  builtAssets[outputPath] = { content, contentType };
-  return outputPath;
 }
 
 export async function serve(handler: Handler) {
@@ -319,12 +362,11 @@ export async function serve(handler: Handler) {
     } : false,
     async fetch(req) {
       const requestId = randomUUID().split("-")[0];
-      const reqWithId = req.headers.has("X-Request-ID")
-        ? req
-        : new Request(req.url, {
-          ...req,
-          headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
-        });
+const reqWithId = req.headers.has("X-Request-ID")
+  ? req
+  : new Request(req, {
+      headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
+    });
 
       return await measure(
         async (measure) => {

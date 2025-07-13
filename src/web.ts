@@ -1,14 +1,14 @@
 import { build as bunBuild, type BuildConfig } from "bun";
-import twPlugin from "bun-plugin-tailwind";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 
-type MeasureContext = {
-  requestId?: string;
-  level?: number;
-  parentAction?: string;
-};
+import autoprefixer from "autoprefixer"
+import postcss from "postcss"
+import tailwind from "@tailwindcss/postcss"
+import fs from 'fs'
+
+import { measure } from "@ments/utils";
 
 type HandlerResponse = Response | AsyncGenerator<string, void, unknown> | string | object;
 
@@ -24,43 +24,9 @@ interface ImportConfig {
 
 type ImportMap = { imports: Record<string, string> };
 
-export async function measure<T>(
-  fn: (measure: typeof measure) => Promise<T>,
-  action: string,
-  context: MeasureContext = {}
-): Promise<T> {
-  const start = performance.now();
-  const level = context.level || 0;
-  const indent = "=".repeat(level > 0 ? level + 1 : 0);
-  const requestId = context.requestId;
-  const logPrefixStart = requestId ? `[${requestId}] ${indent}>` : `${indent}>`;
-  const logPrefixEnd = requestId ? `[${requestId}] ${indent}<` : `${indent}<`;
-
-  try {
-    console.log(`${logPrefixStart} ${action}...`);
-    const result = await fn((nestedFn, nestedAction) =>
-      measure(nestedFn, nestedAction, {
-        requestId,
-        level: level + 1,
-        parentAction: action,
-      })
-    );
-    const duration = performance.now() - start;
-    console.log(`${logPrefixEnd} ${action} ✓ ${duration.toFixed(2)}ms`);
-    return result;
-  } catch (error) {
-    const duration = performance.now() - start;
-    console.log('=========================== ERROR ===========================');
-    console.log(`${logPrefixEnd} ${action} ✗ ${duration.toFixed(2)}ms`);
-    if (error instanceof Error) {
-      console.error(`Error in action "${action}":`, error.message);
-      if (error.stack) console.error(error.stack);
-    } else {
-      console.error(`Unknown error in action "${action}":`, error);
-    }
-    console.log('=============================================================');
-    throw error;
-  }
+// Generate unique request ID (still used for top-level context)
+function generateRequestId(): string {
+  return Math.random().toString(36).substring(2, 10);
 }
 
 const isDev = process.env.NODE_ENV !== "production";
@@ -267,7 +233,6 @@ function getContentType(ext: string): string {
 
 const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
 
-
 export async function asset(filePath: string = ''): Promise<string> {
   const isDev = process.env.NODE_ENV !== "production";
   if (!filePath) {
@@ -300,6 +265,32 @@ export async function asset(filePath: string = ''): Promise<string> {
     buildCache[filePath] = { outputPath, content };
     builtAssets[outputPath] = { content, contentType };
     return outputPath;
+  } else if (ext == '.css') {
+    // console.log("absolutePath", absolutePath)
+    return new Promise((resolve, reject) => {
+      fs.readFile(absolutePath, (err, css) => {
+        if (err) {
+          return reject('cant find style ' + absolutePath);
+        }
+        // console.log("css", css)
+        postcss([autoprefixer, tailwind])
+          .process(css, { from: absolutePath })
+          .then(result => {
+            if (!result.css) {
+              return reject(`empty processed style ` + absolutePath);
+            }
+            const outputPath = `/style.css`; // should be from baseName to support multiple style files
+            const content = result.css; // also we need result.map.toString() for style.css.map
+            const contentType = 'text/css';
+
+            buildCache[filePath] = { outputPath, content };
+            builtAssets[outputPath] = { content, contentType };
+            resolve(outputPath);
+          }).catch(err => {
+            reject('cant process file ' + absolutePath);
+          });
+      })
+    });
   } else {
     // Proceed with build process for non-image files
     let packageJson: any;
@@ -314,8 +305,7 @@ export async function asset(filePath: string = ''): Promise<string> {
 
     const buildConfig: BuildConfig = {
       entrypoints: [absolutePath],
-      outdir: undefined, // No disk output
-      plugins: filePath.includes('.css') ? [twPlugin] : [], // Assuming twPlugin is defined
+      outdir: undefined,
       minify: !isDev,
       target: "browser",
       sourcemap: isDev ? "linked" : undefined,
@@ -361,16 +351,17 @@ export async function serve(handler: Handler) {
       console: true,
     } : false,
     async fetch(req) {
-      const requestId = randomUUID().split("-")[0];
-const reqWithId = req.headers.has("X-Request-ID")
-  ? req
-  : new Request(req, {
-      headers: { ...Object.fromEntries(req.headers.entries()), "X-Request-ID": requestId },
-    });
-
+      // we persist the same request id across multiple requests during the same page refresh: first its     
+      let requestId;
+      if (req.headers.has("X-Request-ID")) {
+        requestId = req.headers.get("X-Request-ID");
+      } else {
+        requestId = randomUUID().split("-")[0]
+        req.headers.set("X-Request-ID", requestId);
+      }
       return await measure(
         async (measure) => {
-          const url = new URL(reqWithId.url);
+          const url = new URL(req.url);
           const pathname = url.pathname;
 
           // Check for built assets in memory
@@ -385,15 +376,16 @@ const reqWithId = req.headers.has("X-Request-ID")
           }
 
           // Handle request with user handler
-          const response = await handler(reqWithId);
+          const response = await handler(req, measure);
 
           if (response instanceof Response) {
+            response.headers.set("X-Request-ID", requestId);
             return response;
           }
 
           if (typeof response === 'string') {
             return new Response(response, {
-              headers: { "Content-Type": "text/html; charset=utf-8" },
+              headers: { "Content-Type": "text/html; charset=utf-8", "X-Request-ID": requestId },
             });
           }
 
@@ -410,6 +402,7 @@ const reqWithId = req.headers.has("X-Request-ID")
               headers: {
                 "Content-Type": "text/html; charset=utf-8",
                 "Transfer-Encoding": "chunked",
+                "X-Request-ID": requestId
               },
             });
           }
@@ -419,16 +412,16 @@ const reqWithId = req.headers.has("X-Request-ID")
           });
         },
         `${req.method} ${req.url}`,
-        { requestId }
+        { requestId, idChain: [requestId] }
       );
     },
     error(error: Error) {
       console.error("[Server Error]", error);
-      
+
       // Ensure we capture all error details
       const errorDetails = error instanceof Error ? error.message : String(error);
       const stackTrace = error instanceof Error ? error.stack : 'No stack trace available';
-      
+
       // Use JSON.stringify to properly escape and format the error object
       const detailedLogs = JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
 
@@ -454,10 +447,10 @@ const reqWithId = req.headers.has("X-Request-ID")
              </body>
            </html>`
         : "Internal Server Error";
-      
+
       return new Response(body, {
         status: 500,
-        headers: { 
+        headers: {
           "Content-Type": "text/html",
           "Cache-Control": "no-store"
         },

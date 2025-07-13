@@ -1,7 +1,9 @@
 {
-  "name": "melinajs",
-  "version": "1.7.0",
+  "name": "@ments/web",
+  "version": "1.9.3",
   "description": "A lightweight, type-safe server framework for Bun with automatic performance tracking.",
+  "module": "./src/web.ts",
+  "main": "./src/web.ts",
   "repository": {
     "type": "git",
     "url": "https://github.com/mements/melina.js"
@@ -12,9 +14,6 @@
   "bugs": "https://github.com/mements/melina.js/issues",
   "homepage": "https://github.com/mements/melina.js#readme",
   "license": "MIT",
-  "engines": {
-    "bun": ">=1.0.0"
-  },
   "keywords": [
     "bun",
     "server",
@@ -28,18 +27,18 @@
     "tailwind"
   ],
   "type": "module",
+  "private": false,
   "sideEffects": false,
   "devDependencies": {
     "@types/bun": "latest"
   },
   "dependencies": {
+    "@ments/utils": "1.0.0",
     "@modelcontextprotocol/sdk": "^1.11.0",
     "@solana/kit": "^2.1.0",
-    "bun-plugin-tailwind": "^0.0.15",
+    "@tailwindcss/postcss": "^4.1.10",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
     "zod": "^3.24.4"
-  },
-  "peerDependencies": {
-    "bun": ">=1.0.0",
-    "typescript": "^5"
   }
 }

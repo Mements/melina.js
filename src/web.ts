@@ -3,16 +3,16 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 
-import autoprefixer from "autoprefixer"
-import postcss from "postcss"
-import tailwind from "@tailwindcss/postcss"
-import fs from 'fs'
+import autoprefixer from "autoprefixer";
+import postcss from "postcss";
+import tailwind from "@tailwindcss/postcss";
+import fs from 'fs';
 
 import { measure } from "@ments/utils";
 
 type HandlerResponse = Response | AsyncGenerator<string, void, unknown> | string | object;
 
-type Handler = (req: Request) => HandlerResponse | Promise<HandlerResponse>;
+type Handler = (req: Request, measure: (fn: () => any, name: string, options?: any) => any) => HandlerResponse | Promise<HandlerResponse>;
 
 interface ImportConfig {
   name: string;
@@ -211,8 +211,14 @@ export async function imports(
 const buildCache: Record<string, { outputPath: string; content: ArrayBuffer }> = {};
 const builtAssets: Record<string, { content: ArrayBuffer; contentType: string }> = {};
 
+/**
+ * ## getContentType
+ * Returns the appropriate MIME type for a given file extension.
+ * This has been expanded to include common font types and other static assets.
+ */
 function getContentType(ext: string): string {
   switch (ext.toLowerCase()) {
+    // Images
     case '.jpg':
     case '.jpeg':
       return 'image/jpeg';
@@ -222,19 +228,58 @@ function getContentType(ext: string): string {
       return 'image/gif';
     case '.webp':
       return 'image/webp';
-    case '.bmp':
-      return 'image/bmp';
     case '.svg':
       return 'image/svg+xml';
+    case '.ico':
+      return 'image/x-icon';
+
+    // Fonts
+    case '.ttf':
+      return 'font/ttf';
+    case '.otf':
+      return 'font/otf';
+    case '.woff':
+      return 'font/woff';
+    case '.woff2':
+      return 'font/woff2';
+    case '.eot':
+      return 'application/vnd.ms-fontobject';
+
+    // Styles & Scripts
+    case '.css':
+      return 'text/css';
+    case '.js':
+      return 'text/javascript';
+
+    // Data & Documents
+    case '.json':
+      return 'application/json';
+    case '.pdf':
+      return 'application/pdf';
+
+    // Audio/Video
+    case '.mp3':
+      return 'audio/mpeg';
+    case '.mp4':
+      return 'video/mp4';
+    case '.webm':
+      return 'video/webm';
+
+    // Default catch-all
     default:
       return 'application/octet-stream';
   }
 }
 
-const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
+// A set of extensions for files that should be served statically without bundling.
+const staticFileExtensions = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', // Images
+  '.ttf', '.otf', '.woff', '.woff2', '.eot',                       // Fonts
+  '.mp3', '.wav', '.ogg', '.mp4', '.webm',                         // Audio/Video
+  '.pdf',                                                          // Documents
+]);
 
 export async function asset(filePath: string = ''): Promise<string> {
-  const isDev = process.env.NODE_ENV !== "production";
   if (!filePath) {
     return '';
   }
@@ -250,49 +295,52 @@ export async function asset(filePath: string = ''): Promise<string> {
   }
 
   const ext = path.extname(absolutePath).toLowerCase();
-  const isImage = imageExtensions.includes(ext);
+  const baseName = path.basename(absolutePath, ext);
 
-  if (isImage) {
-    // Handle image files directly
-    const file = Bun.file(absolutePath);
-    const content = await file.arrayBuffer();
-    const hash = new Bun.CryptoHasher("sha256").update(new Uint8Array(content)).digest('hex').slice(0, 8);
-    const baseName = path.basename(absolutePath, ext);
-    const outputPath = `/${baseName}-${hash}${ext}`;
-    const contentType = getContentType(ext);
+  // 1. Handle CSS files with PostCSS processing
+  if (ext === '.css') {
+    const cssContent = await Bun.file(absolutePath).text();
+    const result = await postcss([autoprefixer, tailwind]).process(cssContent, {
+      from: absolutePath,
+      to: 'style.css', // Dummy 'to' path for source map generation
+      map: isDev ? { inline: false } : false,
+    });
 
-    // Store in cache and assets
+    if (!result.css) {
+      throw new Error(`PostCSS processing returned empty CSS for ${absolutePath}`);
+    }
+
+    let finalCss = result.css;
+    const hash = new Bun.CryptoHasher("sha256").update(finalCss).digest('hex').slice(0, 8);
+    const outputPath = `/${baseName}-${hash}.css`;
+    const contentType = 'text/css';
+
+    // Handle and serve source map in development
+    if (isDev && result.map) {
+      const sourceMapPath = `${outputPath}.map`;
+      const sourceMapContent = result.map.toString();
+      builtAssets[sourceMapPath] = { content: new TextEncoder().encode(sourceMapContent), contentType: 'application/json' };
+      finalCss += `\n/*# sourceMappingURL=${path.basename(sourceMapPath)} */`;
+    }
+
+    const content = new TextEncoder().encode(finalCss);
     buildCache[filePath] = { outputPath, content };
     builtAssets[outputPath] = { content, contentType };
     return outputPath;
-  } else if (ext == '.css') {
-    // console.log("absolutePath", absolutePath)
-    return new Promise((resolve, reject) => {
-      fs.readFile(absolutePath, (err, css) => {
-        if (err) {
-          return reject('cant find style ' + absolutePath);
-        }
-        // console.log("css", css)
-        postcss([autoprefixer, tailwind])
-          .process(css, { from: absolutePath })
-          .then(result => {
-            if (!result.css) {
-              return reject(`empty processed style ` + absolutePath);
-            }
-            const outputPath = `/style.css`; // should be from baseName to support multiple style files
-            const content = result.css; // also we need result.map.toString() for style.css.map
-            const contentType = 'text/css';
+  }
+  // 2. Handle other static files (images, fonts, etc.)
+  else if (staticFileExtensions.has(ext)) {
+    const content = await Bun.file(absolutePath).arrayBuffer();
+    const hash = new Bun.CryptoHasher("sha256").update(new Uint8Array(content)).digest('hex').slice(0, 8);
+    const outputPath = `/${baseName}-${hash}${ext}`;
+    const contentType = getContentType(ext);
 
-            buildCache[filePath] = { outputPath, content };
-            builtAssets[outputPath] = { content, contentType };
-            resolve(outputPath);
-          }).catch(err => {
-            reject('cant process file ' + absolutePath);
-          });
-      })
-    });
-  } else {
-    // Proceed with build process for non-image files
+    buildCache[filePath] = { outputPath, content };
+    builtAssets[outputPath] = { content, contentType };
+    return outputPath;
+  }
+  // 3. Handle files that need to be bundled (JS, TS, etc.)
+  else {
     let packageJson: any;
     try {
       packageJson = (await import(path.resolve(process.cwd(), 'package.json'), { assert: { type: 'json' } })).default;
@@ -305,10 +353,10 @@ export async function asset(filePath: string = ''): Promise<string> {
 
     const buildConfig: BuildConfig = {
       entrypoints: [absolutePath],
-      outdir: undefined,
+      outdir: undefined, // Build to memory
       minify: !isDev,
       target: "browser",
-      sourcemap: isDev ? "linked" : undefined,
+      sourcemap: isDev ? "linked" : "none",
       external,
       define: {
         "process.env.NODE_ENV": JSON.stringify(isDev ? "development" : "production"),
@@ -325,17 +373,22 @@ export async function asset(filePath: string = ''): Promise<string> {
       throw new Error(`Build failed for ${filePath}: ${result.logs.join('\n')}`);
     }
 
-    const output = result.outputs.length > 1 ? result.outputs.find(o => o.kind === 'entry-point') : result.outputs[0];
-    if (!output) {
-      throw new Error(`No output for ${filePath}`);
+    const mainOutput = result.outputs.find(o => o.kind === 'entry-point');
+    if (!mainOutput) {
+      throw new Error(`No entry-point output found for ${filePath}`);
     }
 
-    const content = await output.arrayBuffer();
-    const outputPath = `/${path.basename(output.path).replace(/\\/g, '/')}`;
-    const contentType = output.type ? output.type : output.path.endsWith('.js') ? 'text/javascript' : 'application/octet-stream';
+    // Process all build outputs (e.g., JS file and its sourcemap)
+    for (const output of result.outputs) {
+      const content = await output.arrayBuffer();
+      const outputPath = `/${path.basename(output.path)}`;
+      const contentType = output.type || getContentType(path.extname(output.path));
+      builtAssets[outputPath] = { content, contentType };
+    }
 
-    buildCache[filePath] = { outputPath, content };
-    builtAssets[outputPath] = { content, contentType };
+    const outputPath = `/${path.basename(mainOutput.path)}`;
+    buildCache[filePath] = { outputPath, content: await mainOutput.arrayBuffer() };
+
     return outputPath;
   }
 }
@@ -346,25 +399,20 @@ export async function serve(handler: Handler) {
   const server = Bun.serve({
     idleTimeout: 0,
     port: process.env.BUN_PORT ? parseInt(process.env.BUN_PORT, 10) : undefined,
-    development: isDev ? {
-      hmr: false,
-      console: true,
-    } : false,
+    development: isDev,
     async fetch(req) {
-      // we persist the same request id across multiple requests during the same page refresh: first its     
-      let requestId;
-      if (req.headers.has("X-Request-ID")) {
-        requestId = req.headers.get("X-Request-ID");
-      } else {
+      let requestId = req.headers.get("X-Request-ID");
+      if (!requestId) {
         requestId = randomUUID().split("-")[0]
         req.headers.set("X-Request-ID", requestId);
       }
+
       return await measure(
         async (measure) => {
           const url = new URL(req.url);
           const pathname = url.pathname;
 
-          // Check for built assets in memory
+          // Check for built assets in memory first
           if (builtAssets[pathname]) {
             const { content, contentType } = builtAssets[pathname];
             return new Response(content, {
@@ -389,7 +437,7 @@ export async function serve(handler: Handler) {
             });
           }
 
-          if (typeof response === 'object' && response[Symbol.asyncIterator]) {
+          if (typeof response === 'object' && response != null && response[Symbol.asyncIterator]) {
             const stream = new ReadableStream({
               async start(controller) {
                 for await (const chunk of response as AsyncGenerator<string>) {
@@ -417,35 +465,31 @@ export async function serve(handler: Handler) {
     },
     error(error: Error) {
       console.error("[Server Error]", error);
-
-      // Ensure we capture all error details
-      const errorDetails = error instanceof Error ? error.message : String(error);
-      const stackTrace = error instanceof Error ? error.stack : 'No stack trace available';
-
-      // Use JSON.stringify to properly escape and format the error object
+      const errorDetails = error.message;
+      const stackTrace = error.stack ?? 'No stack trace available';
       const detailedLogs = JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
 
       const body = isDev
         ? `<!DOCTYPE html>
-           <html>
-             <head>
-               <title>Server Error</title>
-               <style>
-                 body { font-family: monospace; padding: 20px; }
-                 pre { background: #f5f5f5; padding: 15px; overflow-x: auto; }
-                 .error { color: #cc0000; }
-               </style>
-             </head>
-             <body>
-               <h1 class="error">Server Error</h1>
-               <h3>Error Details:</h3>
-               <pre>${errorDetails}</pre>
-               <h3>Stack Trace:</h3>
-               <pre>${stackTrace}</pre>
-               <h3>Debug Information:</h3>
-               <pre>${detailedLogs}</pre>
-             </body>
-           </html>`
+            <html>
+              <head>
+                <title>Server Error</title>
+                <style>
+                  body { font-family: monospace; padding: 20px; background: #fff1f1; color: #333; }
+                  pre { background: #fdfdfd; padding: 15px; border-radius: 4px; border: 1px solid #ddd; overflow-x: auto; }
+                  h1 { color: #d92626; }
+                </style>
+              </head>
+              <body>
+                <h1>Server Error</h1>
+                <h3>Error:</h3>
+                <pre>${errorDetails}</pre>
+                <h3>Stack Trace:</h3>
+                <pre>${stackTrace}</pre>
+                <h3>Full Error Object:</h3>
+                <pre>${detailedLogs}</pre>
+              </body>
+            </html>`
         : "Internal Server Error";
 
       return new Response(body, {

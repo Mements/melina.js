@@ -1,4 +1,4 @@
-import { build as bunBuild, type BuildConfig } from "bun";
+import { build as bunBuild, type BuildConfig, type BunFile } from "bun";
 import path from "path";
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
@@ -20,6 +20,8 @@ interface ImportConfig {
   deps?: string[];
   external?: boolean | string[];
   markAllExternal?: boolean;
+  baseName?: string;
+  subpath?: string;
 }
 
 type ImportMap = { imports: Record<string, string> };
@@ -271,22 +273,90 @@ function getContentType(ext: string): string {
   }
 }
 
-// A set of extensions for files that should be served statically without bundling.
-const staticFileExtensions = new Set([
-  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.ico', // Images
-  '.ttf', '.otf', '.woff', '.woff2', '.eot',                       // Fonts
-  '.mp3', '.wav', '.ogg', '.mp4', '.webm',                         // Audio/Video
-  '.pdf',                                                          // Documents
-]);
-
-export async function asset(filePath: string = ''): Promise<string> {
+/**
+ * Build JavaScript/TypeScript files using Bun's bundler
+ * @param filePath Path to the script file
+ * @returns URL path to the built asset
+ */
+export async function buildScript(filePath: string): Promise<string> {
   if (!filePath) {
-    return '';
+    throw new Error('File path is required');
   }
 
   const absolutePath = path.resolve(process.cwd(), filePath);
   if (!existsSync(absolutePath)) {
-    throw new Error(`Asset not found: ${filePath}`);
+    throw new Error(`Script not found: ${filePath}`);
+  }
+
+  // Return cached result in production if available
+  if (!isDev && buildCache[filePath]) {
+    return buildCache[filePath].outputPath;
+  }
+
+  let packageJson: any;
+  try {
+    packageJson = (await import(path.resolve(process.cwd(), 'package.json'), { assert: { type: 'json' } })).default;
+  } catch (e) {
+    throw new Error("package.json not found");
+  }
+
+  const dependencies = { ...(packageJson.dependencies || {}) };
+  const external = Object.keys(dependencies);
+
+  const buildConfig: BuildConfig = {
+    entrypoints: [absolutePath],
+    outdir: undefined, // Build to memory
+    minify: !isDev,
+    target: "browser",
+    sourcemap: isDev ? "linked" : "none",
+    external,
+    define: {
+      "process.env.NODE_ENV": JSON.stringify(isDev ? "development" : "production"),
+    },
+    naming: {
+      entry: "[name]-[hash].[ext]",
+      chunk: "[name]-[hash].[ext]",
+      asset: "[name]-[hash].[ext]",
+    },
+  };
+
+  const result = await bunBuild(buildConfig);
+  if (!result.success || !result.outputs.length) {
+    throw new Error(`Build failed for ${filePath}: ${result.logs.join('\n')}`);
+  }
+
+  const mainOutput = result.outputs.find(o => o.kind === 'entry-point');
+  if (!mainOutput) {
+    throw new Error(`No entry-point output found for ${filePath}`);
+  }
+
+  // Process all build outputs (e.g., JS file and its sourcemap)
+  for (const output of result.outputs) {
+    const content = await output.arrayBuffer();
+    const outputPath = `/${path.basename(output.path)}`;
+    const contentType = output.type || getContentType(path.extname(output.path));
+    builtAssets[outputPath] = { content, contentType };
+  }
+
+  const outputPath = `/${path.basename(mainOutput.path)}`;
+  buildCache[filePath] = { outputPath, content: await mainOutput.arrayBuffer() };
+
+  return outputPath;
+}
+
+/**
+ * Build CSS files with PostCSS processing
+ * @param filePath Path to the CSS file
+ * @returns URL path to the built asset
+ */
+export async function buildStyle(filePath: string): Promise<string> {
+  if (!filePath) {
+    throw new Error('File path is required');
+  }
+
+  const absolutePath = path.resolve(process.cwd(), filePath);
+  if (!existsSync(absolutePath)) {
+    throw new Error(`Style not found: ${filePath}`);
   }
 
   // Return cached result in production if available
@@ -297,113 +367,108 @@ export async function asset(filePath: string = ''): Promise<string> {
   const ext = path.extname(absolutePath).toLowerCase();
   const baseName = path.basename(absolutePath, ext);
 
-  // 1. Handle CSS files with PostCSS processing
-  if (ext === '.css') {
-    const cssContent = await Bun.file(absolutePath).text();
-    const result = await postcss([autoprefixer, tailwind]).process(cssContent, {
-      from: absolutePath,
-      to: 'style.css', // Dummy 'to' path for source map generation
-      map: isDev ? { inline: false } : false,
-    });
+  const cssContent = await Bun.file(absolutePath).text();
+  const result = await postcss([autoprefixer, tailwind]).process(cssContent, {
+    from: absolutePath,
+    to: 'style.css', // Dummy 'to' path for source map generation
+    map: isDev ? { inline: false } : false,
+  });
 
-    if (!result.css) {
-      throw new Error(`PostCSS processing returned empty CSS for ${absolutePath}`);
-    }
-
-    let finalCss = result.css;
-    const hash = new Bun.CryptoHasher("sha256").update(finalCss).digest('hex').slice(0, 8);
-    const outputPath = `/${baseName}-${hash}.css`;
-    const contentType = 'text/css';
-
-    // Handle and serve source map in development
-    if (isDev && result.map) {
-      const sourceMapPath = `${outputPath}.map`;
-      const sourceMapContent = result.map.toString();
-      builtAssets[sourceMapPath] = { content: new TextEncoder().encode(sourceMapContent), contentType: 'application/json' };
-      finalCss += `\n/*# sourceMappingURL=${path.basename(sourceMapPath)} */`;
-    }
-
-    const content = new TextEncoder().encode(finalCss);
-    buildCache[filePath] = { outputPath, content };
-    builtAssets[outputPath] = { content, contentType };
-    return outputPath;
+  if (!result.css) {
+    throw new Error(`PostCSS processing returned empty CSS for ${absolutePath}`);
   }
-  // 2. Handle other static files (images, fonts, etc.)
-  else if (staticFileExtensions.has(ext)) {
-    const content = await Bun.file(absolutePath).arrayBuffer();
-    const hash = new Bun.CryptoHasher("sha256").update(new Uint8Array(content)).digest('hex').slice(0, 8);
-    const outputPath = `/${baseName}-${hash}${ext}`;
-    const contentType = getContentType(ext);
 
-    buildCache[filePath] = { outputPath, content };
-    builtAssets[outputPath] = { content, contentType };
-    return outputPath;
+  let finalCss = result.css;
+  const hash = new Bun.CryptoHasher("sha256").update(finalCss).digest('hex').slice(0, 8);
+  const outputPath = `/${baseName}-${hash}.css`;
+  const contentType = 'text/css';
+
+  // Handle and serve source map in development
+  if (isDev && result.map) {
+    const sourceMapPath = `${outputPath}.map`;
+    const sourceMapContent = result.map.toString();
+    builtAssets[sourceMapPath] = { content: new TextEncoder().encode(sourceMapContent), contentType: 'application/json' };
+    finalCss += `\n/*# sourceMappingURL=${path.basename(sourceMapPath)} */`;
   }
-  // 3. Handle files that need to be bundled (JS, TS, etc.)
-  else {
-    let packageJson: any;
-    try {
-      packageJson = (await import(path.resolve(process.cwd(), 'package.json'), { assert: { type: 'json' } })).default;
-    } catch (e) {
-      throw new Error("package.json not found");
+
+  const content = new TextEncoder().encode(finalCss);
+  buildCache[filePath] = { outputPath, content };
+  builtAssets[outputPath] = { content, contentType };
+  return outputPath;
+}
+
+/**
+ * Build static assets (images, fonts, etc.) from BunFile
+ * @param file BunFile object
+ * @returns URL path to the built asset
+ */
+export async function buildAsset(file?: BunFile): Promise<string> {
+  if (!file) {
+    return '';
+  }
+
+  // Get the file path from the BunFile object
+  const filePath = file.name || '';
+  if (!filePath) {
+    throw new Error('BunFile object must have a name property');
+  }
+
+  // Check if file exists by trying to get its size
+  const fileExists = await file.exists();
+  if (!fileExists) {
+    throw new Error(`Asset not found: ${filePath}`);
+  }
+
+  // Return cached result in production if available
+  if (!isDev && buildCache[filePath]) {
+    return buildCache[filePath].outputPath;
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const baseName = path.basename(filePath, ext);
+
+  const content = await file.arrayBuffer();
+  const hash = new Bun.CryptoHasher("sha256").update(new Uint8Array(content)).digest('hex').slice(0, 8);
+  const outputPath = `/${baseName}-${hash}${ext}`;
+  const contentType = getContentType(ext);
+
+  buildCache[filePath] = { outputPath, content };
+  builtAssets[outputPath] = { content, contentType };
+  return outputPath;
+}
+
+// Legacy function for backwards compatibility
+export async function asset(fileOrPath: BunFile | string): Promise<string> {
+  console.warn('asset() is deprecated. Use buildScript(), buildStyle(), or buildAsset() instead.');
+  
+  if (typeof fileOrPath === 'string') {
+    const ext = path.extname(fileOrPath).toLowerCase();
+    if (ext === '.css') {
+      return buildStyle(fileOrPath);
+    } else if (ext === '.js' || ext === '.ts' || ext === '.jsx' || ext === '.tsx') {
+      return buildScript(fileOrPath);
+    } else {
+      // For other files, create a BunFile and use buildAsset
+      const file = Bun.file(fileOrPath);
+      return buildAsset(file);
     }
-
-    const dependencies = { ...(packageJson.dependencies || {}) };
-    const external = Object.keys(dependencies);
-
-    const buildConfig: BuildConfig = {
-      entrypoints: [absolutePath],
-      outdir: undefined, // Build to memory
-      minify: !isDev,
-      target: "browser",
-      sourcemap: isDev ? "linked" : "none",
-      external,
-      define: {
-        "process.env.NODE_ENV": JSON.stringify(isDev ? "development" : "production"),
-      },
-      naming: {
-        entry: "[name]-[hash].[ext]",
-        chunk: "[name]-[hash].[ext]",
-        asset: "[name]-[hash].[ext]",
-      },
-    };
-
-    const result = await bunBuild(buildConfig);
-    if (!result.success || !result.outputs.length) {
-      throw new Error(`Build failed for ${filePath}: ${result.logs.join('\n')}`);
-    }
-
-    const mainOutput = result.outputs.find(o => o.kind === 'entry-point');
-    if (!mainOutput) {
-      throw new Error(`No entry-point output found for ${filePath}`);
-    }
-
-    // Process all build outputs (e.g., JS file and its sourcemap)
-    for (const output of result.outputs) {
-      const content = await output.arrayBuffer();
-      const outputPath = `/${path.basename(output.path)}`;
-      const contentType = output.type || getContentType(path.extname(output.path));
-      builtAssets[outputPath] = { content, contentType };
-    }
-
-    const outputPath = `/${path.basename(mainOutput.path)}`;
-    buildCache[filePath] = { outputPath, content: await mainOutput.arrayBuffer() };
-
-    return outputPath;
+  } else {
+    // It's a BunFile
+    return buildAsset(fileOrPath);
   }
 }
 
-export async function serve(handler: Handler) {
+export async function serve(handler: Handler, options?: { port?: number }) {
   const isDev = process.env.NODE_ENV !== "production";
 
   const server = Bun.serve({
     idleTimeout: 0,
-    port: process.env.BUN_PORT ? parseInt(process.env.BUN_PORT, 10) : undefined,
+    port: options?.port || process.env.BUN_PORT ? parseInt(process.env.BUN_PORT!, 10) : undefined,
     development: isDev,
     async fetch(req) {
       let requestId = req.headers.get("X-Request-ID");
       if (!requestId) {
-        requestId = randomUUID().split("-")[0]
+        requestId = generateRequestId();
         req.headers.set("X-Request-ID", requestId);
       }
 
@@ -427,8 +492,16 @@ export async function serve(handler: Handler) {
           const response = await handler(req, measure);
 
           if (response instanceof Response) {
-            response.headers.set("X-Request-ID", requestId);
-            return response;
+            // Create a new headers object to ensure we can modify it
+            const headers = new Headers(response.headers);
+            headers.set("X-Request-ID", requestId);
+            
+            // Clone the response with the updated headers
+            return new Response(response.body, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: headers
+            });
           }
 
           if (typeof response === 'string') {
@@ -504,4 +577,10 @@ export async function serve(handler: Handler) {
 
   console.log(`🦊 Melina server running at http://localhost:${server.port}`);
   return server;
+}
+
+// Clear caches for testing
+export function clearCaches() {
+  Object.keys(buildCache).forEach(key => delete buildCache[key]);
+  Object.keys(builtAssets).forEach(key => delete builtAssets[key]);
 }

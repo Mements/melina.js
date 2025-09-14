@@ -39,9 +39,14 @@ export async function imports(
   lockFile: any = null,
 ): Promise<ImportMap> {
   let packageJson: any = pkgJson;
+  if (pkgJson === null) {
+    return { imports: {} };
+  }
   if (!packageJson) {
     try {
-      packageJson = (await import(path.resolve(process.cwd(), 'package.json'), { assert: { type: 'json' } })).default;
+      const packagePath = path.resolve(process.cwd(), 'package.json');
+      console.log('packagePath', packagePath);
+      packageJson = (await import(packagePath, { assert: { type: 'json' } })).default;
     } catch (e) {
       console.error("Failed to load package.json:", e);
       return { imports: {} };
@@ -320,11 +325,20 @@ export async function buildScript(filePath: string): Promise<string> {
     },
   };
 
-  const result = await bunBuild(buildConfig);
-  if (!result.success || !result.outputs.length) {
-    throw new Error(`Build failed for ${filePath}: ${result.logs.join('\n')}`);
+  let result;
+  try {
+    result = await bunBuild(buildConfig);
+  } catch (error) {
+    // Fallback to Bun.$`bun build` for better error output
+    console.error(`bunBuild failed, trying fallback: ${error}`);
+    try {
+      await Bun.$`bun build ${absolutePath} --outdir /tmp --target browser --sourcemap=${isDev ? "linked" : "none"}`;
+    } catch (fallbackError) {
+      throw new Error(`Build failed for ${filePath}: ${fallbackError}`);
+    }
+    throw new Error(`Build failed for ${filePath}: ${error}`);
   }
-
+  
   const mainOutput = result.outputs.find(o => o.kind === 'entry-point');
   if (!mainOutput) {
     throw new Error(`No entry-point output found for ${filePath}`);

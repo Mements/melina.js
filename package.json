@@ -1,6 +1,6 @@
 {
   "name": "@ments/web",
-  "version": "1.10.0",
+  "version": "1.10.6",
   "description": "A lightweight, type-safe server framework for Bun with automatic performance tracking.",
   "module": "./src/web.ts",
   "main": "./src/web.ts",

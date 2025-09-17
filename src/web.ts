@@ -9,6 +9,7 @@ import tailwind from "@tailwindcss/postcss";
 import fs from 'fs';
 
 import { measure } from "@ments/utils";
+import { dedent } from "ts-dedent";
 
 type HandlerResponse = Response | AsyncGenerator<string, void, unknown> | string | object;
 
@@ -39,9 +40,6 @@ export async function imports(
   lockFile: any = null,
 ): Promise<ImportMap> {
   let packageJson: any = pkgJson;
-  if (pkgJson === null) {
-    return { imports: {} };
-  }
   if (!packageJson) {
     try {
       const packagePath = path.resolve(process.cwd(), 'package.json');
@@ -283,7 +281,7 @@ function getContentType(ext: string): string {
  * @param filePath Path to the script file
  * @returns URL path to the built asset
  */
-export async function buildScript(filePath: string): Promise<string> {
+export async function buildScript(filePath: string, allExternal = false): Promise<string> {
   if (!filePath) {
     throw new Error('File path is required');
   }
@@ -306,7 +304,8 @@ export async function buildScript(filePath: string): Promise<string> {
   }
 
   const dependencies = { ...(packageJson.dependencies || {}) };
-  const external = Object.keys(dependencies);
+  let external = Object.keys(dependencies);
+  if (allExternal) external = ["*"];
 
   const buildConfig: BuildConfig = {
     entrypoints: [absolutePath],
@@ -332,7 +331,7 @@ export async function buildScript(filePath: string): Promise<string> {
     // Fallback to Bun.$`bun build` for better error output
     console.error(`bunBuild failed, trying fallback: ${error}`);
     try {
-      await Bun.$`bun build ${absolutePath} --outdir /tmp --target browser --sourcemap=${isDev ? "linked" : "none"}`;
+      await Bun.$`bun build ${absolutePath} --external ${external.join(',')} --outdir /tmp --target browser --sourcemap=${isDev ? "linked" : "none"}`;
     } catch (fallbackError) {
       throw new Error(`Build failed for ${filePath}: ${fallbackError}`);
     }
@@ -475,9 +474,15 @@ export async function asset(fileOrPath: BunFile | string): Promise<string> {
 export async function serve(handler: Handler, options?: { port?: number }) {
   const isDev = process.env.NODE_ENV !== "production";
 
-  const server = Bun.serve({
+  let port = options?.port;
+  if (!port) {
+    // @dev undefined means assigning random available port
+    port = process.env.BUN_PORT ? parseInt(process.env.BUN_PORT!, 10) : undefined
+  }
+
+  const args = {
     idleTimeout: 0,
-    port: options?.port || process.env.BUN_PORT ? parseInt(process.env.BUN_PORT!, 10) : undefined,
+    port: port,
     development: isDev,
     async fetch(req) {
       let requestId = req.headers.get("X-Request-ID");
@@ -505,6 +510,29 @@ export async function serve(handler: Handler, options?: { port?: number }) {
           // Handle request with user handler
           const response = await handler(req, measure);
 
+          if (typeof response === 'object' && response != null && response[Symbol.asyncIterator]) {
+            const stream = new ReadableStream({
+              async start(controller) {
+                try {
+                  for await (const chunk of response as AsyncGenerator<string>) {
+                    controller.enqueue(new TextEncoder().encode(chunk));
+                  }
+                } catch (error) {
+                  console.error('Stream error:', error);
+                } finally {
+                  controller.close();
+                }
+              },
+            });
+            return new Response(stream, {
+              headers: {
+                "Content-Type": "text/html; charset=utf-8",
+                "Transfer-Encoding": "chunked",
+                "X-Request-ID": requestId
+              },
+            });
+          }
+
           if (response instanceof Response) {
             // Create a new headers object to ensure we can modify it
             const headers = new Headers(response.headers);
@@ -521,24 +549,6 @@ export async function serve(handler: Handler, options?: { port?: number }) {
           if (typeof response === 'string') {
             return new Response(response, {
               headers: { "Content-Type": "text/html; charset=utf-8", "X-Request-ID": requestId },
-            });
-          }
-
-          if (typeof response === 'object' && response != null && response[Symbol.asyncIterator]) {
-            const stream = new ReadableStream({
-              async start(controller) {
-                for await (const chunk of response as AsyncGenerator<string>) {
-                  controller.enqueue(new TextEncoder().encode(chunk));
-                }
-                controller.close();
-              },
-            });
-            return new Response(stream, {
-              headers: {
-                "Content-Type": "text/html; charset=utf-8",
-                "Transfer-Encoding": "chunked",
-                "X-Request-ID": requestId
-              },
             });
           }
 
@@ -587,14 +597,161 @@ export async function serve(handler: Handler, options?: { port?: number }) {
         },
       });
     },
-  });
+  }
+
+  let server;
+  try {
+    server = Bun.serve(args);
+  } catch (err) {
+    if (err.code == 'EADDRINUSE') {
+      args.port = findAvailablePort(3001);
+    }
+    server = Bun.serve(args);
+  }
 
   console.log(`🦊 Melina server running at http://localhost:${server.port}`);
   return server;
+}
+
+export function findAvailablePort(startPort: number = 3001): Promise<number> {
+  for (let port = startPort; port < startPort + 100; port++) {
+    try {
+      const listener = Bun.listen({
+        port,
+        hostname: 'localhost',
+        socket: {
+          close() {
+            // Close callback
+          },
+          data() {
+            // Data callback
+          },
+        },
+      });
+      listener.stop();
+      return port;
+    } catch (e: any) {
+      if (!e.message.includes('EADDRINUSE') && !e.message.includes('Address already in use')) {
+        throw e;
+      }
+      // Continue to next port
+    }
+  }
+  throw new Error(`No available port found in range ${startPort}-${startPort + 99}`);
 }
 
 // Clear caches for testing
 export function clearCaches() {
   Object.keys(buildCache).forEach(key => delete buildCache[key]);
   Object.keys(builtAssets).forEach(key => delete builtAssets[key]);
+}
+
+interface FrontendAppOptions {
+  entrypoint: string;
+  stylePath?: string;
+  title?: string;
+  viewport?: string;
+  rebuild?: boolean;
+  serverData?: any;
+  additionalAssets?: Array<{ path: string; type: string }>;
+  meta?: Array<{ name: string; content: string }>;
+  head?: string;
+}
+
+export async function spa(options: FrontendAppOptions): Promise<string> {
+  return frontendApp(options);
+}
+
+// @deprecated
+export async function frontendApp(options: FrontendAppOptions): Promise<string> {
+  const { 
+    entrypoint, 
+    stylePath, 
+    title = "Frontend App", 
+    viewport = "width=device-width, initial-scale=1",
+    rebuild = true, 
+    serverData = {}, 
+    additionalAssets = [],
+    meta = [],
+    head = '' 
+  } = options;
+  
+ 
+  // Build CSS
+  let stylesVirtualPath = '';
+  if (stylePath) {
+    try {
+      stylesVirtualPath = await buildStyle(stylePath);
+    } catch (error) {
+      console.warn(`Style not found: ${stylePath}`);
+    }
+  }
+  
+  // Build additional assets
+  const assetPaths: string[] = [];
+  for (const asset of additionalAssets) {
+    const file = Bun.file(asset.path);
+    const virtualPath = await buildAsset(file);
+    if (virtualPath) {
+      assetPaths.push(virtualPath);
+    }
+  }
+  
+  // Build React script
+  const scriptPath = entrypoint.startsWith('/') ? entrypoint : path.join(process.cwd(), entrypoint);
+  
+  const subpathImports = ['react-dom/client', 'react/jsx-dev-runtime', 'wouter/use-browser-location'];
+  
+  const packagePath = path.resolve(process.cwd(), 'package.json');
+  const packageJson = (await import(packagePath, { assert: { type: 'json' } })).default;
+  
+  const importMaps = `
+   <script type="importmap">
+    ${JSON.stringify(await imports(subpathImports, packageJson))}
+    </script>
+  `;
+
+  // Handle different build modes
+  let scriptVirtualPath = '';
+  if (rebuild) {
+    scriptVirtualPath = await measure(() => buildScript(scriptPath), `build script from ${scriptPath}`);
+  } else {
+    scriptVirtualPath = await measure(() => buildScript(scriptPath), `build script from ${scriptPath}`);
+  }
+  
+  if (!scriptVirtualPath) throw `failed to build script`;
+
+  // Generate meta tags
+  const metaTags = meta.map(m => `<meta name="${m.name}" content="${m.content}">`).join('\n');
+  
+  // Generate additional head content
+  const additionalHead = additionalAssets.map(asset => {
+    if (asset.type === 'icon') {
+      return `<link rel="icon" type="image/png" href="${assetPaths[0] || ''}">`;
+    }
+    return '';
+  }).join('\n');
+
+  return dedent`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        ${importMaps}
+        <meta charset="utf-8">
+        <meta name="viewport" content="${viewport}">
+        ${metaTags}
+        <title>${title}</title>
+        ${additionalHead}
+        ${head}
+        ${stylesVirtualPath ? `<link rel="stylesheet" href="${stylesVirtualPath}" >` : ''}
+      </head>
+      <body>
+        <div id="root"></div>
+        <script>
+          window.SERVER_DATA = ${JSON.stringify(serverData)};
+        </script>
+        <script src="${scriptVirtualPath}" type="module"></script>
+      </body>
+    </html>
+  `;
 }

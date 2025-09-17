@@ -1,5 +1,6 @@
 import path from "path";
-import { serve, asset, imports } from "../../src/web";
+import { measure } from "@ments/utils";
+import { serve, buildScript, buildStyle, imports } from "../../src/web";
 
 // 'important': all imports are generated automatically except those with subpath like react-dom/client we need to include manually
 const importMapScript = `
@@ -16,14 +17,14 @@ async function* streamReactPage(req: Request) {
     <head>
       <title>Melina + React</title>
       ${importMapScript}
-      <script src="${await asset(path.join(__dirname, 'App.client.tsx'))}" type="module" defer></script>
-      <link rel="stylesheet" href="${await asset(path.join(__dirname, 'App.css'))}" />
+      <script src="${await buildScript(path.join(__dirname, 'App.client.tsx'))}" type="module" defer></script>
+      <link rel="stylesheet" href="${await buildStyle(path.join(__dirname, 'App.css'))}" />
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
     </head>
     <body>
       <div id="root">
-        <div class="p-4 text-xl text-gray-500">Loading app...</div>
+        <div id="loading" class="p-4 text-xl text-gray-500">Loading app...</div>
       </div>
   `;
 
@@ -44,7 +45,7 @@ async function* streamReactPage(req: Request) {
   `;
 }
 
-const { port } = serve(async (req: Request) => {
+const { port } = await serve(async (req: Request) => {
   const url = new URL(req.url);
   if (url.pathname === '/') {
     return streamReactPage(req);

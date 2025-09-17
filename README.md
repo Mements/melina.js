@@ -22,6 +22,153 @@ A lightweight, streaming-first web framework for Bun that delivers blazing fast 
 bun add melinajs
 ```
 
+## Examples
+
+Melina.js provides multiple architectural patterns for building web applications. Each example demonstrates different approaches to streaming, rendering, and performance optimization.
+
+### 🔌 Streaming Examples (Real-time Updates with Loading States)
+
+#### 1. Stream Vanilla (`examples/stream-vanilla/`)
+**Pure streaming approach with real-time updates**
+
+```typescript
+async function* streamIndexPage() {
+  yield `<div style="display: flex; flex-direction: column-reverse; font-size: 24px;">`;
+  while (true) {
+    yield `<span>${new Date()}</span>`;
+    await Bun.sleep(1000);
+  }
+}
+```
+
+**Characteristics:**
+- ✅ **Streaming HTML chunks** in real-time
+- ✅ **Loading indicator** (built-in display of data)
+- ✅ **Progressive rendering** - browser renders immediately
+- ⚠️ **Manual HTML construction** - more complex setup
+- ⚠️ **No asset building** - minimal features
+
+**Use case:** Real-time dashboards, live data displays, progressive content loading
+
+#### 2. Stream React Tailwind (`examples/stream-react-tailwind/`)
+**Streaming with React and Tailwind CSS**
+
+```typescript
+async function* streamReactPage(req: Request) {
+  // Initial HTML with loading state
+  yield `<div id="root"><div id="loading" class="p-4 text-xl text-gray-500">Loading app...</div></div>`;
+  
+  // Fetch server data
+  const serverData = await measure(async () => fetchServerData(), "Fetch Server Data");
+  
+  // Inject data and replace loading state
+  yield `<script>window.SERVER_DATA = ${JSON.stringify(serverData)};</script>`;
+}
+```
+
+**Characteristics:**
+- ✅ **Streaming HTML with loading states**
+- ✅ **React + Tailwind CSS support**
+- ✅ **Manual import maps and asset building**
+- ✅ **Progressive enhancement** - shows loading then content
+- ✅ **Advanced streaming** with data fetching
+- ⚠️ **Complex setup** - requires manual asset management
+- ⚠️ **More boilerplate** for streaming React
+
+**Use case:** Complex SPAs with loading states, progressive data loading, real-time updates
+
+### 📦 Wrapped Examples (Simplified API, No Loading States)
+
+#### 3. Wrapped Vanilla (`examples/wrapped-vanilla/`)
+**Simplified API for vanilla JavaScript**
+
+```typescript
+return new Response(await frontendApp({
+  entrypoint: path.join(__dirname, './frontend.ts'),
+  title: "Vanilla JS Example",
+  meta: [{ name: "description", content: "A vanilla JavaScript app with Melina" }],
+  serverData: {
+    message: "Hello from Vanilla JS!",
+    timestamp: new Date().toISOString()
+  }
+}));
+```
+
+**Characteristics:**
+- ✅ **Simple API** - single function call
+- ✅ **Asset building** - automatic CSS/JS processing
+- ✅ **Import maps** - automatic dependency management
+- ✅ **Complete HTML generation** - no loading states
+- ✅ **Minimal boilerplate**
+- ⚠️ **No streaming** - generates complete HTML at once
+- ⚠️ **No loading indicators** - content appears after full build
+
+**Use case:** Simple vanilla JS apps, rapid prototyping, when streaming complexity isn't needed
+
+#### 4. Wrapped React (`examples/wrapped-react/`)
+**Simplified API for React with Tailwind CSS**
+
+```typescript
+return new Response(await frontendApp({
+  entrypoint: path.join(__dirname, './App.client.tsx'),
+  stylePath: path.join(__dirname, './App.css'),
+  title: "Melina + React",
+  viewport: "width=device-width, initial-scale=1.0",
+  rebuild: true,
+  serverData: {
+    message: "Hello from React with Melina!",
+    timestamp: new Date().toISOString()
+  }
+}));
+```
+
+**Characteristics:**
+- ✅ **Very simple API** - minimal setup required
+- ✅ **Full React + Tailwind CSS support**
+- ✅ **Automatic asset building and optimization**
+- ✅ **Complete HTML generation with server data**
+- ✅ **Error handling built-in**
+- ✅ **No streaming complexity**
+- ⚠️ **No loading indicators** - waits for complete build
+- ⚠️ **No real-time updates**
+
+**Use case:** Traditional React apps, content-heavy pages, when simplicity is preferred over streaming
+
+### Key Differences: Streaming vs Wrapped
+
+#### Loading Indicators: Why the Difference?
+
+**🔄 Streaming Examples (HAVE loading indicators):**
+- **Manual HTML construction** - build initial HTML with loading states
+- **Progressive rendering** - send partial HTML immediately, then update
+- **Server data fetching** - fetch data separately and inject later
+- **Real-time updates** - continuously stream new content
+- **Example:** `stream-react-tailwind` shows "Loading app..." then replaces it with actual content
+
+**📦 Wrapped Examples (NO loading indicators):**
+- **Complete HTML generation** - build entire HTML at once
+- **Asset building included** - process CSS/JS before sending response
+- **Single response** - send complete HTML immediately
+- **No intermediate states** - content appears after full build completes
+- **Example:** `wrapped-react` waits for all assets and HTML generation before sending response
+
+#### When to Use Each Pattern
+
+**Choose Streaming when:**
+- ✅ You need real-time updates (live data, chat, dashboards)
+- ✅ You want progressive loading (show content as it's ready)
+- ✅ You need loading states for better UX
+- ✅ You're building SPAs with complex data fetching
+- ⚠️ You're willing to handle more complexity
+
+**Choose Wrapped when:**
+- ✅ You want simplicity and fast development
+- ✅ You don't need real-time updates
+- ✅ You prefer traditional server-rendered HTML
+- ✅ You want automatic asset handling
+- ✅ You're building content-heavy pages
+- ⚠️ You can accept loading time for complete rendering
+
 ## Quick Start
 
 [MCP Example](./examples/mcp/server.ts)

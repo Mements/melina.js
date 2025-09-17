@@ -1,0 +1,60 @@
+#!/usr/bin/env bun
+
+import { mkdir, copyFile, readdir, stat } from "fs/promises";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const templatePath = join(__dirname, "..", "examples", "vanilla");
+const currentDir = process.cwd();
+
+async function copyDirectory(src: string, dest: string) {
+    const entries = await readdir(src, { withFileTypes: true });
+    
+    for (const entry of entries) {
+        const srcPath = join(src, entry.name);
+        const destPath = join(dest, entry.name);
+        
+        if (entry.isDirectory()) {
+            await mkdir(destPath, { recursive: true });
+            await copyDirectory(srcPath, destPath);
+        } else {
+            await copyFile(srcPath, destPath);
+        }
+    }
+}
+
+async function main() {
+    const args = process.argv.slice(2);
+    const [command, projectName] = args;
+    
+    if (command !== "init" || !projectName || projectName === "-h" || projectName === "--help") {
+        console.log("Usage: bunx melina init <project-name>");
+        console.log("Example: bunx melina init my-new-project");
+        return;
+    }
+    
+    const projectPath = join(currentDir, projectName);
+    
+    try {
+        await stat(projectPath);
+        console.error(`Error: Directory "${projectName}" already exists`);
+        process.exit(1);
+    } catch (error) {
+        // Directory doesn't exist, which is what we want
+    }
+    
+    try {
+        await mkdir(projectPath, { recursive: true });
+        await copyDirectory(templatePath, projectPath);
+        
+        console.log(`✅ Successfully created project "${projectName}"`);
+        console.log(`📁 Navigate to your project: cd ${projectName}`);
+        console.log(`🚀 Run your project: bun run index.ts`);
+    } catch (error) {
+        console.error(`Error creating project: ${error}`);
+        process.exit(1);
+    }
+}
+
+main();

@@ -191,20 +191,17 @@ export async function imports(
 
       if (isDev) queryParts.push("dev");
 
-      let paramsPrefix = '?';
-      let paramsSuffix = '';
-      if (key.endsWith('/')) {
-        paramsPrefix = '&';
-        paramsSuffix = '/';
-      }
-
-      if (queryParts.length) url += `${paramsPrefix}${queryParts.join("&")}${paramsSuffix}`;
+      const query = queryParts.length ? `?${queryParts.join('&')}` : '';
 
       measure(
         () => {
-          importMap.imports[key] = url;
+          importMap.imports[key] = url + query;
+          if (!key.endsWith('/')) {
+            let subQuery = query ? query.replace(/^\?/, '&') : '';
+            importMap.imports[key + '/'] = url + subQuery + '/';
+          }
         },
-        `Import for ${key} is ${url}`,
+        `Import for ${key} is ${url + query}`,
         { level: 1 }
       );
     });
@@ -656,6 +653,7 @@ interface FrontendAppOptions {
   additionalAssets?: Array<{ path: string; type: string }>;
   meta?: Array<{ name: string; content: string }>;
   head?: string;
+  headerScripts?: string[];
 }
 
 export async function spa(options: FrontendAppOptions): Promise<string> {
@@ -673,7 +671,8 @@ export async function frontendApp(options: FrontendAppOptions): Promise<string> 
     serverData = {}, 
     additionalAssets = [],
     meta = [],
-    head = '' 
+    head = '',
+    headerScripts = []
   } = options;
   
  
@@ -732,6 +731,11 @@ export async function frontendApp(options: FrontendAppOptions): Promise<string> 
     return '';
   }).join('\n');
 
+  // Generate header scripts
+  const headerScriptsHtml = headerScripts.map(script => 
+    `<script>${script}</script>`
+  ).join('\n');
+
   return dedent`
     <!DOCTYPE html>
     <html>
@@ -742,6 +746,7 @@ export async function frontendApp(options: FrontendAppOptions): Promise<string> 
         ${metaTags}
         <title>${title}</title>
         ${additionalHead}
+        ${headerScriptsHtml}
         ${head}
         ${stylesVirtualPath ? `<link rel="stylesheet" href="${stylesVirtualPath}" >` : ''}
       </head>

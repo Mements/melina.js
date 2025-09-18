@@ -1,12 +1,12 @@
 import path from 'path';
-import { serve, frontendApp } from "../../src/web";
+import { serve, spa } from "../../src/web";
 
-const { port } = serve(async (req: Request, measure) => {
+const { port } = await serve(async (req: Request, measure) => {
   const url = new URL(req.url);
   
   if (url.pathname === '/') {
     try {
-      return new Response(await frontendApp({
+      return new Response(await spa
         entrypoint: path.join(__dirname, './App.client.tsx'),
         stylePath: path.join(__dirname, './App.css'),
         title: "Melina + React",
@@ -39,6 +39,6 @@ const { port } = serve(async (req: Request, measure) => {
     return Response.json({ message: "Hello from API" });
   }
   return new Response('Not Found', { status: 404 });
-});
+}, { port: process.env.CUSTOM_PORT || process.env.BUN_PORT });
 
 console.log("React example server running. Open http://localhost:" + port);

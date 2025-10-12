@@ -1,6 +1,6 @@
 {
   "name": "@ments/web",
-  "version": "1.11.9",
+  "version": "1.12.0",
   "description": "A lightweight, type-safe server framework for Bun with automatic performance tracking.",
   "module": "./src/web.ts",
   "main": "./src/web.ts",
@@ -33,7 +33,7 @@
     "@types/bun": "latest"
   },
   "dependencies": {
-    "@ments/utils": "1.0.0",
+    "@ments/utils": "^1.2.1",
     "@modelcontextprotocol/sdk": "^1.11.0",
     "@solana/kit": "^2.1.0",
     "@tailwindcss/postcss": "^4.1.10",

@@ -7,6 +7,7 @@ import autoprefixer from "autoprefixer";
 import postcss from "postcss";
 import tailwind from "@tailwindcss/postcss";
 import fs from 'fs';
+import { unlink } from 'fs/promises';
 
 import { measure } from "@ments/utils";
 import { dedent } from "ts-dedent";
@@ -468,7 +469,7 @@ export async function asset(fileOrPath: BunFile | string): Promise<string> {
   }
 }
 
-export async function serve(handler: Handler, options?: { port?: number }) {
+export async function serve(handler: Handler, options?: { port?: number; unix?: string }) {
   const isDev = process.env.NODE_ENV !== "production";
 
   let port = options?.port;
@@ -476,10 +477,14 @@ export async function serve(handler: Handler, options?: { port?: number }) {
     // @dev undefined means assigning random available port
     port = process.env.BUN_PORT ? parseInt(process.env.BUN_PORT!, 10) : undefined
   }
+  const unix = options?.unix;
+
+  if (port !== undefined && unix) {
+    throw new Error("Cannot specify both port and unix socket");
+  }
 
   const args = {
     idleTimeout: 0,
-    port: port,
     development: isDev,
     async fetch(req) {
       let requestId = req.headers.get("X-Request-ID");
@@ -594,23 +599,38 @@ export async function serve(handler: Handler, options?: { port?: number }) {
         },
       });
     },
+  };
+
+  if (unix) {
+    args.unix = unix;
+    if (!unix.startsWith('\0')) {
+      await unlink(unix).catch(() => {});
+    }
+  } else {
+    args.port = port;
   }
 
   let server;
   try {
     server = Bun.serve(args);
   } catch (err) {
-    if (err.code == 'EADDRINUSE') {
+    if (!unix && err.code === 'EADDRINUSE') {
       args.port = findAvailablePort(3001);
+      server = Bun.serve(args);
+    } else {
+      throw err;
     }
-    server = Bun.serve(args);
   }
 
-  console.log(`🦊 Melina server running at http://localhost:${server.port}`);
+  if (unix) {
+    console.log(`🦊 Melina server running on unix socket ${unix}`);
+  } else {
+    console.log(`🦊 Melina server running at http://localhost:${server.port}`);
+  }
   return server;
 }
 
-export function findAvailablePort(startPort: number = 3001): Promise<number> {
+export function findAvailablePort(startPort: number = 3001): number {
   for (let port = startPort; port < startPort + 100; port++) {
     try {
       const listener = Bun.listen({

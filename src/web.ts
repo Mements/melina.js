@@ -35,6 +35,9 @@ function generateRequestId(): string {
 
 const isDev = process.env.NODE_ENV !== "production";
 
+// Global cleanup function for unix socket
+let cleanupUnixSocket: (() => Promise<void>) | null = null;
+
 export async function imports(
   subpaths: string[] = [],
   pkgJson: any = null,
@@ -469,18 +472,63 @@ export async function asset(fileOrPath: BunFile | string): Promise<string> {
   }
 }
 
+/**
+ * Automatically determines port or unix socket from BUN_PORT env var or CLI arg
+ * Handles cleanup and graceful shutdown automatically
+ */
 export async function serve(handler: Handler, options?: { port?: number; unix?: string }) {
   const isDev = process.env.NODE_ENV !== "production";
 
-  let port = options?.port;
-  if (!port) {
-    // @dev undefined means assigning random available port
-    port = process.env.BUN_PORT ? parseInt(process.env.BUN_PORT!, 10) : undefined
+  // Automatic detection logic - users don't need to do this anymore
+  let port: number | undefined;
+  let unix: string | undefined;
+
+  if (options?.port !== undefined) {
+    port = options.port;
+  } else if (options?.unix !== undefined) {
+    unix = options.unix;
+  } else {
+    // Auto-detect from BUN_PORT env var OR CLI argument
+    const bunPort = process.env.BUN_PORT;
+    const cliArg = process.argv[2];
+    
+    if (bunPort) {
+      const parsedPort = parseInt(bunPort, 10);
+      if (!isNaN(parsedPort)) {
+        port = parsedPort;
+      } else {
+        unix = bunPort;
+      }
+    } else if (cliArg) {
+      const parsedPort = parseInt(cliArg, 10);
+      if (!isNaN(parsedPort)) {
+        port = parsedPort;
+      } else {
+        unix = cliArg;
+      }
+    }
   }
-  const unix = options?.unix;
+
+  // Default to unix socket if neither specified
+  if (!port && !unix) {
+    unix = '/tmp/trader.sock';
+  }
 
   if (port !== undefined && unix) {
     throw new Error("Cannot specify both port and unix socket");
+  }
+
+  // Handle unix socket cleanup BEFORE starting server
+  if (unix) {
+    if (!unix.startsWith('\0')) {
+      await unlink(unix).catch(() => {});
+    }
+    // Store cleanup function for shutdown
+    cleanupUnixSocket = async () => {
+      if (unix && !unix.startsWith('\0')) {
+        await unlink(unix).catch(() => {});
+      }
+    };
   }
 
   const args = {
@@ -603,9 +651,6 @@ export async function serve(handler: Handler, options?: { port?: number; unix?: 
 
   if (unix) {
     args.unix = unix;
-    if (!unix.startsWith('\0')) {
-      await unlink(unix).catch(() => {});
-    }
   } else {
     args.port = port;
   }
@@ -622,11 +667,26 @@ export async function serve(handler: Handler, options?: { port?: number; unix?: 
     }
   }
 
+  // AUTOMATIC STARTUP LOG
   if (unix) {
     console.log(`🦊 Melina server running on unix socket ${unix}`);
   } else {
     console.log(`🦊 Melina server running at http://localhost:${server.port}`);
   }
+
+  // AUTOMATIC SHUTDOWN HANDLING
+  const shutdown = async (signal: string) => {
+    console.log(`🛑 Received ${signal}, shutting down gracefully...`);
+    if (cleanupUnixSocket) {
+      await cleanupUnixSocket();
+    }
+    server.stop?.();
+    process.exit(0);
+  };
+
+  process.on("SIGINT", () => shutdown('SIGINT'));
+  process.on("SIGTERM", () => shutdown('SIGTERM'));
+
   return server;
 }
 
